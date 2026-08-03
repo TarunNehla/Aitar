@@ -1,0 +1,10 @@
+node_modules/
+.pnpm-store/
+dist/
+.env
+.DS_Store
+.cloud-agent/
+coverage/
+*.log
+chatgpt.json
+claude.json
