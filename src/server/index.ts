@@ -6,6 +6,7 @@ import { createApi } from "./api.js";
 import { closeDatabase } from "./db/client.js";
 import { agentWorker } from "./runtime/agent-runner.js";
 import { config } from "./config.js";
+import { errorForLog, logger } from "./logger.js";
 
 const app = createApi();
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -16,17 +17,52 @@ if (config.NODE_ENV === "production" && existsSync(clientDirectory)) {
   app.get("*splat", (_request, response) => response.sendFile(join(clientDirectory, "index.html")));
 }
 
-const server = app.listen(config.PORT, async () => {
-  await agentWorker.start();
-  console.log(`Cloud Agents V0 is running on http://localhost:${config.PORT}`);
+const server = app.listen(config.PORT, () => {
+  void agentWorker
+    .start()
+    .then(() => {
+      logger.info(
+        {
+          port: config.PORT,
+          environment: config.NODE_ENV,
+          maxActiveRuns: config.MAX_ACTIVE_RUNS,
+          defaultModel: config.OPENROUTER_MODEL,
+        },
+        "Cloud Agents API started",
+      );
+    })
+    .catch((error) => {
+      logger.fatal({ error: errorForLog(error) }, "Agent worker failed to start");
+      void shutdown("startup_failure", 1);
+    });
 });
 
-async function shutdown() {
+let shuttingDown = false;
+
+async function shutdown(reason: string, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info({ reason }, "Backend shutdown started");
   agentWorker.stop();
   server.close();
-  await closeDatabase();
-  process.exit(0);
+  try {
+    await closeDatabase();
+    logger.info("Backend shutdown completed");
+  } catch (error) {
+    logger.error({ error: errorForLog(error) }, "Database shutdown failed");
+    exitCode = 1;
+  }
+  logger.flush();
+  process.exit(exitCode);
 }
 
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
+process.once("SIGINT", () => void shutdown("SIGINT"));
+process.once("SIGTERM", () => void shutdown("SIGTERM"));
+process.once("uncaughtException", (error) => {
+  logger.fatal({ error: errorForLog(error) }, "Uncaught exception");
+  void shutdown("uncaught_exception", 1);
+});
+process.once("unhandledRejection", (error) => {
+  logger.fatal({ error: errorForLog(error) }, "Unhandled promise rejection");
+  void shutdown("unhandled_rejection", 1);
+});

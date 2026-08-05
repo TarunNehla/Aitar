@@ -61,6 +61,20 @@ pnpm dev
 
 Open `http://localhost:5173`.
 
+## Logging
+
+The backend writes structured operational logs to standard output.
+
+Development uses readable Pino output when `LOG_PRETTY=true`.
+
+Production uses JSON output when `LOG_PRETTY=false`.
+
+Set `LOG_LEVEL` to `debug`, `info`, `warn`, or `error` to control verbosity.
+
+Logs include request IDs, run IDs, workspace IDs, tool names, timing, exit codes, token usage, and cost.
+
+Logs do not include prompts, complete commands, file contents, command output, API keys, cookies, or database URLs.
+
 ## Production
 
 Build and start the single Node.js service.

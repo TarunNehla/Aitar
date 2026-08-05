@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { errorForLog, logger } from "../logger.js";
+
+const processLogger = logger.child({ component: "process" });
 
 export interface ProcessResult {
   stdout: string;
@@ -19,6 +22,9 @@ export async function runProcess(
   } = {},
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    processLogger.debug({ executable: command, timeoutMs }, "Process started");
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: process.env,
@@ -45,8 +51,14 @@ export async function runProcess(
 
     const timer = setTimeout(() => {
       abort();
-      finish(() => reject(new Error(`Command timed out after ${options.timeoutMs} ms`)));
-    }, options.timeoutMs ?? 120_000);
+      finish(() => {
+        processLogger.warn(
+          { executable: command, durationMs: Date.now() - startedAt },
+          "Process timed out",
+        );
+        reject(new Error(`Command timed out after ${timeoutMs} ms`));
+      });
+    }, timeoutMs);
     timer.unref();
 
     if (options.signal?.aborted) abort();
@@ -64,9 +76,29 @@ export async function runProcess(
       options.onStderr?.(chunk);
     });
 
-    child.on("error", (error) => finish(() => reject(error)));
+    child.on("error", (error) =>
+      finish(() => {
+        processLogger.error(
+          { error: errorForLog(error), executable: command, durationMs: Date.now() - startedAt },
+          "Process failed to start",
+        );
+        reject(error);
+      }),
+    );
     child.on("close", (code) => {
-      finish(() => resolve({ stdout, stderr, exitCode: code ?? 1 }));
+      finish(() => {
+        const exitCode = code ?? 1;
+        const data = {
+          executable: command,
+          exitCode,
+          durationMs: Date.now() - startedAt,
+          stdoutBytes: Buffer.byteLength(stdout),
+          stderrBytes: Buffer.byteLength(stderr),
+        };
+        if (exitCode === 0) processLogger.debug(data, "Process completed");
+        else processLogger.debug(data, "Process exited with a non-zero status");
+        resolve({ stdout, stderr, exitCode });
+      });
     });
 
     if (options.input !== undefined) {
@@ -82,6 +114,7 @@ export async function runChecked(
 ): Promise<ProcessResult> {
   const result = await runProcess(command, args, options);
   if (result.exitCode !== 0) {
+    processLogger.warn({ executable: command, exitCode: result.exitCode }, "Checked process failed");
     throw new Error(result.stderr.trim() || result.stdout.trim() || `${command} exited with ${result.exitCode}`);
   }
   return result;

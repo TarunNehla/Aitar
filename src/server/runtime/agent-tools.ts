@@ -5,6 +5,7 @@ import { inspectCommand } from "./command-policy.js";
 import type { EventWriter } from "./event-writer.js";
 import { workspaceManager } from "./workspace-manager.js";
 import { createApproval } from "../db/store.js";
+import { logger } from "../logger.js";
 
 interface ToolContext {
   workspaceId: string;
@@ -20,6 +21,12 @@ function textResult(text: string, details: Record<string, unknown> = {}) {
 }
 
 export function createAgentTools(context: ToolContext): AgentTool[] {
+  const toolLogger = logger.child({
+    component: "agent-tools",
+    runId: context.runId,
+    sessionId: context.sessionId,
+    workspaceId: context.workspaceId,
+  });
   const listFiles: AgentTool = {
     name: "list_files",
     label: "List files",
@@ -39,8 +46,10 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     description: "Read a UTF-8 text file from the repository.",
     parameters: Type.Object({ path: Type.String({ minLength: 1 }) }),
     execute: async (_callId, params: any) => {
-      const content = await workspaceManager.readFile(context.repositoryPath, String(params.path));
-      return textResult(content, { path: params.path });
+      const path = String(params.path);
+      const content = await workspaceManager.readFile(context.repositoryPath, path);
+      toolLogger.debug({ path, bytes: Buffer.byteLength(content) }, "Repository file read");
+      return textResult(content, { path });
     },
   };
 
@@ -75,6 +84,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
       const path = String(params.path);
       const content = String(params.content);
       await workspaceManager.writeFile(context.repositoryPath, path, content);
+      toolLogger.info({ path, bytes: Buffer.byteLength(content) }, "Repository file written");
       await context.writer.emit("file_changed", { path, operation: "write", bytes: Buffer.byteLength(content) });
       return textResult(`Wrote ${path}.`, { path, bytes: Buffer.byteLength(content) });
     },
@@ -98,6 +108,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
       if (!policy.allowed) throw new Error(policy.reason);
 
       if (policy.approvalRequired) {
+        toolLogger.warn({ toolCallId: callId, network }, "Sandbox command approval requested");
         const approval = await createApproval({
           sessionId: context.sessionId,
           runId: context.runId,
@@ -110,6 +121,8 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
           reason: approval.reason,
         });
         const approved = await approvalBroker.wait(approval.id, signal);
+        if (approved) toolLogger.info({ toolCallId: callId }, "Sandbox command approval granted");
+        else toolLogger.warn({ toolCallId: callId }, "Sandbox command approval denied");
         await context.writer.emit("approval_resolved", { approvalId: approval.id, approved });
         if (!approved) throw new Error("The user denied or did not answer the approval request");
       }

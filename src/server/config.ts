@@ -19,6 +19,8 @@ const envSchema = z.object({
   SANDBOX_CPUS: z.coerce.number().positive().default(1),
   SANDBOX_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(120),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
+  LOG_PRETTY: z.enum(["true", "false"]).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -30,4 +32,8 @@ if (!parsed.success) {
 export const config = {
   ...parsed.data,
   WORKSPACE_ROOT: resolve(parsed.data.WORKSPACE_ROOT),
+  LOG_LEVEL: parsed.data.LOG_LEVEL ?? (parsed.data.NODE_ENV === "production" ? "info" : "debug"),
+  LOG_PRETTY: parsed.data.LOG_PRETTY
+    ? parsed.data.LOG_PRETTY === "true"
+    : parsed.data.NODE_ENV === "development",
 };

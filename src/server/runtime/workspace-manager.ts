@@ -1,7 +1,10 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { config } from "../config.js";
+import { errorForLog, logger } from "../logger.js";
 import { runChecked, runProcess, type ProcessResult } from "./process.js";
+
+const workspaceLogger = logger.child({ component: "workspace-manager" });
 
 export interface WorkspaceLocation {
   root: string;
@@ -48,6 +51,8 @@ function containerName(workspaceId: string): string {
 
 export class WorkspaceManager {
   async prepare(input: { workspaceId: string; repositoryUrl: string; baseBranch: string }) {
+    const startedAt = Date.now();
+    workspaceLogger.info({ workspaceId: input.workspaceId }, "Workspace preparation started");
     const url = validateRepositoryUrl(input.repositoryUrl);
     const location = workspaceLocation(input.workspaceId);
     await mkdir(location.root, { recursive: true });
@@ -69,19 +74,38 @@ export class WorkspaceManager {
 
     const baseCommit = (await runChecked("git", ["rev-parse", "HEAD"], { cwd: location.repository })).stdout.trim();
     await this.ensureSandbox(input.workspaceId, location.repository);
+    workspaceLogger.info(
+      { workspaceId: input.workspaceId, durationMs: Date.now() - startedAt },
+      "Workspace preparation completed",
+    );
     return { ...location, baseCommit };
   }
 
   async ensureSandbox(workspaceId: string, repositoryPath: string): Promise<string> {
     const name = containerName(workspaceId);
     const inspected = await runProcess("docker", ["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 10_000 });
-    if (inspected.exitCode === 0 && inspected.stdout.trim() === "true") return name;
-
-    if (inspected.exitCode === 0) {
-      await runChecked("docker", ["start", name], { timeoutMs: 30_000 });
+    if (inspected.exitCode === 0 && inspected.stdout.trim() === "true") {
+      workspaceLogger.debug({ workspaceId, containerName: name }, "Sandbox container reused");
       return name;
     }
 
+    if (inspected.exitCode === 0) {
+      workspaceLogger.info({ workspaceId, containerName: name }, "Sandbox container starting");
+      await runChecked("docker", ["start", name], { timeoutMs: 30_000 });
+      workspaceLogger.info({ workspaceId, containerName: name }, "Sandbox container started");
+      return name;
+    }
+
+    workspaceLogger.info(
+      {
+        workspaceId,
+        containerName: name,
+        image: config.SANDBOX_IMAGE,
+        memoryMb: config.SANDBOX_MEMORY_MB,
+        cpus: config.SANDBOX_CPUS,
+      },
+      "Sandbox container creating",
+    );
     await runChecked(
       "docker",
       [
@@ -111,6 +135,7 @@ export class WorkspaceManager {
       ],
       { timeoutMs: 120_000 },
     );
+    workspaceLogger.info({ workspaceId, containerName: name }, "Sandbox container created");
     return name;
   }
 
@@ -125,6 +150,11 @@ export class WorkspaceManager {
       onStderr?: (chunk: string) => void;
     } = {},
   ): Promise<ProcessResult> {
+    const startedAt = Date.now();
+    workspaceLogger.info(
+      { workspaceId, network: Boolean(options.network), commandBytes: Buffer.byteLength(command) },
+      "Sandbox command started",
+    );
     const common = {
       signal: options.signal,
       timeoutMs: config.SANDBOX_TIMEOUT_SECONDS * 1_000,
@@ -132,37 +162,58 @@ export class WorkspaceManager {
       onStderr: options.onStderr,
     };
 
-    if (options.network) {
-      return runProcess(
-        "docker",
-        [
-          "run",
-          "--rm",
-          "--workdir",
-          "/workspace",
-          "--mount",
-          `type=bind,src=${repositoryPath},dst=/workspace`,
-          "--memory",
-          `${config.SANDBOX_MEMORY_MB}m`,
-          "--cpus",
-          String(config.SANDBOX_CPUS),
-          "--pids-limit",
-          "256",
-          "--cap-drop",
-          "ALL",
-          "--security-opt",
-          "no-new-privileges:true",
-          config.SANDBOX_IMAGE,
-          "sh",
-          "-lc",
-          command,
-        ],
-        common,
-      );
-    }
+    try {
+      let result: ProcessResult;
+      if (options.network) {
+        result = await runProcess(
+          "docker",
+          [
+            "run",
+            "--rm",
+            "--workdir",
+            "/workspace",
+            "--mount",
+            `type=bind,src=${repositoryPath},dst=/workspace`,
+            "--memory",
+            `${config.SANDBOX_MEMORY_MB}m`,
+            "--cpus",
+            String(config.SANDBOX_CPUS),
+            "--pids-limit",
+            "256",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges:true",
+            config.SANDBOX_IMAGE,
+            "sh",
+            "-lc",
+            command,
+          ],
+          common,
+        );
+      } else {
+        const name = await this.ensureSandbox(workspaceId, repositoryPath);
+        result = await runProcess("docker", ["exec", name, "sh", "-lc", command], common);
+      }
 
-    const name = await this.ensureSandbox(workspaceId, repositoryPath);
-    return runProcess("docker", ["exec", name, "sh", "-lc", command], common);
+      const data = {
+        workspaceId,
+        network: Boolean(options.network),
+        exitCode: result.exitCode,
+        durationMs: Date.now() - startedAt,
+        stdoutBytes: Buffer.byteLength(result.stdout),
+        stderrBytes: Buffer.byteLength(result.stderr),
+      };
+      if (result.exitCode === 0) workspaceLogger.info(data, "Sandbox command completed");
+      else workspaceLogger.warn(data, "Sandbox command failed");
+      return result;
+    } catch (error) {
+      workspaceLogger.error(
+        { error: errorForLog(error), workspaceId, network: Boolean(options.network), durationMs: Date.now() - startedAt },
+        "Sandbox command could not complete",
+      );
+      throw error;
+    }
   }
 
   async listFiles(repositoryPath: string, limit = 500): Promise<string[]> {
@@ -228,13 +279,24 @@ export class WorkspaceManager {
     await mkdir(location.artifacts, { recursive: true });
     const patchPath = join(location.artifacts, `${input.runId}-${checkpointCommit.slice(0, 8)}.patch`);
     await writeFile(patchPath, patch, "utf8");
+    const changedFiles = await this.changedFiles(input.repositoryPath, input.baseCommit, checkpointCommit);
+
+    workspaceLogger.info(
+      {
+        workspaceId: input.workspaceId,
+        runId: input.runId,
+        changedFileCount: changedFiles.length,
+        patchBytes: Buffer.byteLength(patch),
+      },
+      "Workspace checkpoint saved",
+    );
 
     return {
       checkpointCommit,
       internalRef,
       patchPath,
       patchSize: Buffer.byteLength(patch),
-      changedFiles: await this.changedFiles(input.repositoryPath, input.baseCommit, checkpointCommit),
+      changedFiles,
     };
   }
 

@@ -4,6 +4,7 @@ import type { NextFunction, Request, Response } from "express";
 import express from "express";
 import { z } from "zod";
 import { config } from "./config.js";
+import { errorForLog, httpLogger } from "./logger.js";
 import {
   createProject,
   createQueuedUserMessage,
@@ -70,6 +71,7 @@ function routeParam(request: Request, name: string): string {
 export function createApi() {
   const app = express();
   app.disable("x-powered-by");
+  app.use(httpLogger);
   app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_request, response) => {
@@ -292,9 +294,14 @@ export function createApi() {
     }),
   );
 
-  app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
     const message = error instanceof Error ? error.message : "Unexpected error";
     const status = error instanceof z.ZodError ? 400 : message.includes("active run") ? 409 : 500;
+    if (error instanceof z.ZodError) {
+      request.log.warn({ issueCount: error.issues.length }, "Request validation failed");
+    } else {
+      request.log.error({ error: errorForLog(error) }, "API request failed");
+    }
     response.status(status).json({ error: message });
   });
 

@@ -26,6 +26,7 @@ import {
   startToolExecution,
 } from "../db/store.js";
 import type { MessageView } from "../../shared/contracts.js";
+import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
 import { workspaceManager } from "./workspace-manager.js";
@@ -188,20 +189,30 @@ export const activeRuns = new ActiveRuns();
 
 export class AgentWorker {
   private readonly workerId = newWorkerId();
+  private readonly log = logger.child({ component: "agent-worker", workerId: this.workerId });
   private active = 0;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private ticking = false;
 
   async start(): Promise<void> {
+    this.log.info("Agent worker recovery started");
     await recoverStaleRuns();
-    this.timer = setInterval(() => void this.tick(), 500);
+    this.log.info("Agent worker recovery completed");
+    this.timer = setInterval(() => this.scheduleTick(), 500);
     await this.tick();
   }
 
   stop(): void {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
+    this.log.info({ activeRuns: this.active }, "Agent worker stopped");
+  }
+
+  private scheduleTick(): void {
+    void this.tick().catch((error) => {
+      this.log.error({ error: errorForLog(error) }, "Agent worker polling failed");
+    });
   }
 
   private async tick(): Promise<void> {
@@ -210,14 +221,18 @@ export class AgentWorker {
     try {
       const claimed = await claimPendingRun(this.workerId);
       if (!claimed) return;
+      this.log.info({ runId: claimed.id, sessionId: claimed.session_id }, "Agent run claimed");
       this.active += 1;
       void this.execute(claimed)
         .catch((error) => {
-          console.error(`Run ${claimed.id} failed unexpectedly`, error);
+          this.log.error(
+            { error: errorForLog(error), runId: claimed.id, sessionId: claimed.session_id },
+            "Agent run failed unexpectedly",
+          );
         })
         .finally(() => {
           this.active -= 1;
-          void this.tick();
+          this.scheduleTick();
         });
     } finally {
       this.ticking = false;
@@ -225,11 +240,20 @@ export class AgentWorker {
   }
 
   private async execute(run: ClaimedRun): Promise<void> {
+    const startedAt = Date.now();
     const relation = await getSession(run.session_id);
     if (!relation) {
       await finishRun({ runId: run.id, status: "failed", error: "Session not found" });
       return;
     }
+
+    const runLog = this.log.child({
+      runId: run.id,
+      sessionId: run.session_id,
+      workspaceId: relation.workspace.id,
+      model: run.model,
+    });
+    runLog.info({ maxTurns: run.max_turns, maxCostUsd: run.max_cost_usd }, "Agent run started");
 
     const writer = new EventWriter(run.session_id, run.id);
     let inputTokens = 0;
@@ -347,8 +371,16 @@ export class AgentWorker {
       const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
       await finishRun({ runId: run.id, status, inputTokens, outputTokens, costUsd });
       await writer.emit("run_completed", { status, inputTokens, outputTokens, costUsd, turns });
+      runLog.info(
+        { status, inputTokens, outputTokens, costUsd, turns, durationMs: Date.now() - startedAt },
+        "Agent run finished",
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      runLog.error(
+        { error: errorForLog(error), inputTokens, outputTokens, costUsd, turns, durationMs: Date.now() - startedAt },
+        "Agent run failed",
+      );
       try {
         await checkpoint();
       } catch {
@@ -420,6 +452,10 @@ export class AgentWorker {
     }
 
     if (event.type === "tool_execution_start") {
+      this.log.info(
+        { runId: run.id, sessionId: run.session_id, toolCallId: event.toolCallId, toolName: event.toolName },
+        "Agent tool started",
+      );
       await startToolExecution({
         runId: run.id,
         callId: event.toolCallId,
@@ -438,6 +474,15 @@ export class AgentWorker {
       const text = event.result?.content
         ?.map((block: { type: string; text?: string }) => (block.type === "text" ? block.text : "[image]"))
         .join("\n");
+      const toolLogData = {
+        runId: run.id,
+        sessionId: run.session_id,
+        toolCallId: event.toolCallId,
+        toolName: event.toolName,
+        resultBytes: Buffer.byteLength(text ?? ""),
+      };
+      if (event.isError) this.log.warn(toolLogData, "Agent tool failed");
+      else this.log.info(toolLogData, "Agent tool completed");
       await finishToolExecution({
         runId: run.id,
         callId: event.toolCallId,
