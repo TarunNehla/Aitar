@@ -33,6 +33,10 @@ interface Approval {
   command: string | null;
 }
 
+type TimelineItem =
+  | { kind: "message"; id: string; createdAt: string; message: MessageView }
+  | { kind: "event"; id: string; createdAt: string; event: SessionEvent; reasoningCompleted: boolean };
+
 interface SessionDetail extends SessionListItem {
   messages: MessageView[];
   runs: Run[];
@@ -53,6 +57,63 @@ function messageText(message: MessageView): string {
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   return `${(value / 1024).toFixed(1)} KB`;
+}
+
+function toolLabel(value: unknown): string {
+  return String(value ?? "Tool").replaceAll("_", " ");
+}
+
+function buildTimeline(messages: MessageView[], events: SessionEvent[]): TimelineItem[] {
+  const completedToolCalls = new Set(
+    messages
+      .filter((message) => message.role === "tool")
+      .flatMap((message) => message.blocks.map((block) => String(block.data.callId ?? "")))
+      .filter(Boolean),
+  );
+  const reasoningCompletions = events.filter((event) => event.type === "reasoning_completed");
+  const visibleTypes = new Set([
+    "run_started",
+    "run_completed",
+    "run_failed",
+    "reasoning_started",
+    "tool_started",
+    "file_changed",
+    "checkpoint_saved",
+    "artifact_created",
+    "approval_requested",
+    "approval_resolved",
+  ]);
+
+  const timeline: TimelineItem[] = messages.map((message) => ({
+    kind: "message",
+    id: `message-${message.id}`,
+    createdAt: message.createdAt,
+    message,
+  }));
+
+  for (const event of events) {
+    if (!visibleTypes.has(event.type)) continue;
+    if (event.type === "tool_started" && completedToolCalls.has(String(event.payload.callId ?? ""))) continue;
+    const reasoningCompleted =
+      event.type === "reasoning_started" &&
+      reasoningCompletions.some(
+        (completion) => completion.runId === event.runId && completion.sequence > event.sequence,
+      );
+    timeline.push({
+      kind: "event",
+      id: `event-${event.id}`,
+      createdAt: event.createdAt,
+      event,
+      reasoningCompleted,
+    });
+  }
+
+  return timeline.sort((left, right) => {
+    const timeDifference = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+    if (timeDifference !== 0) return timeDifference;
+    if (left.kind === "event" && right.kind === "event") return left.event.sequence - right.event.sequence;
+    return left.kind === "message" ? -1 : 1;
+  });
 }
 
 export function App() {
@@ -100,7 +161,10 @@ export function App() {
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent;
-      setEvents((current) => [...current, event].slice(-300));
+      setEvents((current) => {
+        if (current.some((candidate) => candidate.sequence === event.sequence)) return current;
+        return [...current, event].slice(-300);
+      });
 
       if (event.type === "assistant_text_delta") {
         setStreamingText((current) => current + String(event.payload.delta ?? ""));
@@ -143,6 +207,14 @@ export function App() {
   }, [detail, selectedId, streamingText]);
 
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
+  const timeline = useMemo(
+    () => buildTimeline(detail?.messages ?? [], events),
+    [detail?.messages, events],
+  );
+  const timelineArtifactIds = useMemo(
+    () => new Set(events.filter((event) => event.type === "artifact_created").map((event) => String(event.payload.artifactId ?? ""))),
+    [events],
+  );
 
   if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
 
@@ -225,7 +297,7 @@ export function App() {
                 shouldFollowMessagesRef.current = distanceFromBottom < 80;
               }}
             >
-              {detail.messages.length === 0 && (
+              {timeline.length === 0 && (
                 <div className="empty-chat">
                   <div className="empty-icon">⌁</div>
                   <h2>What should the agent build?</h2>
@@ -233,8 +305,35 @@ export function App() {
                 </div>
               )}
 
-              {detail.messages.map((message) => (
-                <Message key={message.id} message={message} />
+              {timeline.map((item) =>
+                item.kind === "message" ? (
+                  <Message key={item.id} message={item.message} />
+                ) : (
+                  <TimelineEvent
+                    key={item.id}
+                    event={item.event}
+                    reasoningCompleted={item.reasoningCompleted}
+                    artifacts={detail.artifacts}
+                  />
+                ),
+              )}
+
+              {detail.artifacts
+                .filter((artifact) => !timelineArtifactIds.has(artifact.id))
+                .map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+
+              {detail.approvals.map((approval) => (
+                <ApprovalCard
+                  key={approval.id}
+                  approval={approval}
+                  onResolve={async (approved) => {
+                    await api(`/api/approvals/${approval.id}`, {
+                      method: "POST",
+                      body: JSON.stringify({ approved }),
+                    });
+                    await loadDetail(detail.session.id);
+                  }}
+                />
               ))}
 
               {streamingText && (
@@ -272,44 +371,6 @@ export function App() {
           <div className="center-state">Loading session…</div>
         )}
       </main>
-
-      <aside className="activity-panel">
-        <div className="panel-section">
-          <p className="eyebrow">Live activity</p>
-          <Activity events={events} />
-        </div>
-
-        <div className="panel-section artifacts-section">
-          <p className="eyebrow">Artifacts</p>
-          {detail?.artifacts.length ? (
-            detail.artifacts.map((artifact) => (
-              <a className="artifact" href={`/api/artifacts/${artifact.id}`} target="_blank" key={artifact.id}>
-                <span className="artifact-icon">↗</span>
-                <span>
-                  <strong>{artifact.name}</strong>
-                  <small>{formatBytes(artifact.size)}</small>
-                </span>
-              </a>
-            ))
-          ) : (
-            <p className="muted">Artifacts appear when a run finishes.</p>
-          )}
-        </div>
-
-        {detail?.approvals.map((approval) => (
-          <ApprovalCard
-            key={approval.id}
-            approval={approval}
-            onResolve={async (approved) => {
-              await api(`/api/approvals/${approval.id}`, {
-                method: "POST",
-                body: JSON.stringify({ approved }),
-              });
-              await loadDetail(detail.session.id);
-            }}
-          />
-        ))}
-      </aside>
     </div>
   );
 }
@@ -328,8 +389,12 @@ function Message({ message }: { message: MessageView }) {
       );
     }
     return (
-      <details className="tool-message">
-        <summary>{String(block?.data.toolName ?? "Tool")} completed</summary>
+      <details className={`tool-message ${block?.data.isError ? "failed" : ""}`}>
+        <summary>
+          <span className="tool-icon">›</span>
+          <span>{toolLabel(block?.data.toolName)}</span>
+          <small>{block?.data.isError ? "Failed" : "Completed"}</small>
+        </summary>
         <pre>{messageText(message)}</pre>
       </details>
     );
@@ -419,28 +484,92 @@ function Composer({
   );
 }
 
-function Activity({ events }: { events: SessionEvent[] }) {
-  const visible = events.filter((event) => !event.type.includes("delta")).slice(-12).reverse();
-  if (!visible.length) return <p className="muted">Waiting for activity.</p>;
+function TimelineEvent({
+  event,
+  reasoningCompleted,
+  artifacts,
+}: {
+  event: SessionEvent;
+  reasoningCompleted: boolean;
+  artifacts: Artifact[];
+}) {
+  if (event.type === "artifact_created") {
+    const artifact = artifacts.find((candidate) => candidate.id === String(event.payload.artifactId ?? ""));
+    if (artifact) return <ArtifactCard artifact={artifact} />;
+  }
+
+  let icon = "✓";
+  let title = event.type.replaceAll("_", " ");
+  let detail = "";
+  let tone = "neutral";
+
+  if (event.type === "run_started") {
+    icon = "●";
+    title = "Agent started working";
+    detail = String(event.payload.model ?? "");
+    tone = "working";
+  } else if (event.type === "run_completed") {
+    title = "Run completed";
+    detail = `${Number(event.payload.outputTokens ?? 0).toLocaleString()} output tokens`;
+    tone = "success";
+  } else if (event.type === "run_failed") {
+    icon = "!";
+    title = "Run failed";
+    detail = String(event.payload.error ?? "The agent could not complete this run.");
+    tone = "error";
+  } else if (event.type === "reasoning_started") {
+    icon = reasoningCompleted ? "✓" : "●";
+    title = reasoningCompleted ? "Reasoning completed" : "Agent is reasoning";
+    tone = reasoningCompleted ? "neutral" : "working";
+  } else if (event.type === "tool_started") {
+    icon = "›";
+    title = `${toolLabel(event.payload.toolName)} running`;
+    tone = "working";
+  } else if (event.type === "file_changed") {
+    icon = "+";
+    title = "File updated";
+    detail = String(event.payload.path ?? "");
+  } else if (event.type === "checkpoint_saved") {
+    icon = "◆";
+    title = "Checkpoint saved";
+    const changedFiles = Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0;
+    detail = changedFiles === 1 ? "1 changed file" : `${changedFiles} changed files`;
+  } else if (event.type === "approval_requested") {
+    icon = "?";
+    title = "Waiting for approval";
+    detail = String(event.payload.reason ?? "");
+    tone = "warning";
+  } else if (event.type === "approval_resolved") {
+    title = event.payload.approved ? "Approval granted" : "Approval denied";
+    tone = event.payload.approved ? "success" : "error";
+  }
 
   return (
-    <div className="activity-list">
-      {visible.map((event) => (
-        <div className="activity-row" key={event.id}>
-          <span className={`event-dot ${event.type.includes("failed") ? "error" : ""}`} />
-          <div>
-            <strong>{event.type.replaceAll("_", " ")}</strong>
-            <small>{event.type === "tool_started" ? String(event.payload.toolName ?? "") : ""}</small>
-          </div>
-        </div>
-      ))}
+    <div className={`timeline-event ${tone}`}>
+      <span className="timeline-event-icon">{icon}</span>
+      <span className="timeline-event-copy">
+        <strong>{title}</strong>
+        {detail && <small>{detail}</small>}
+      </span>
     </div>
+  );
+}
+
+function ArtifactCard({ artifact }: { artifact: Artifact }) {
+  return (
+    <a className="artifact inline-artifact" href={`/api/artifacts/${artifact.id}`} target="_blank" rel="noreferrer">
+      <span className="artifact-icon">↗</span>
+      <span>
+        <strong>{artifact.name}</strong>
+        <small>{formatBytes(artifact.size)} · Download artifact</small>
+      </span>
+    </a>
   );
 }
 
 function ApprovalCard({ approval, onResolve }: { approval: Approval; onResolve: (approved: boolean) => Promise<void> }) {
   return (
-    <div className="approval-card">
+    <div className="approval-card inline-approval">
       <p className="eyebrow">Approval needed</p>
       <strong>{approval.reason}</strong>
       {approval.command && <code>{approval.command}</code>}
