@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
 
@@ -61,7 +63,9 @@ export function App() {
   const [streamingText, setStreamingText] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const shouldFollowMessagesRef = useRef(true);
+  const renderedSessionRef = useRef<string | null>(null);
 
   const loadSessions = useCallback(async () => {
     const result = await api<{ sessions: SessionListItem[] }>("/api/sessions");
@@ -86,8 +90,11 @@ export function App() {
       setDetail(null);
       return;
     }
+    setDetail((current) => current?.session.id === selectedId ? current : null);
     setEvents([]);
     setStreamingText("");
+    shouldFollowMessagesRef.current = true;
+    renderedSessionRef.current = null;
     loadDetail(selectedId).catch((reason) => setError(reason.message));
 
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
@@ -120,9 +127,20 @@ export function App() {
     return () => source.close();
   }, [selectedId, loadDetail, loadSessions]);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [detail?.messages.length, streamingText]);
+  useLayoutEffect(() => {
+    const messages = messagesRef.current;
+    if (!messages || !detail || detail.session.id !== selectedId) return;
+
+    const changedSession = renderedSessionRef.current !== detail.session.id;
+    if (changedSession) {
+      renderedSessionRef.current = detail.session.id;
+      shouldFollowMessagesRef.current = true;
+    }
+
+    if (changedSession || shouldFollowMessagesRef.current) {
+      messages.scrollTop = messages.scrollHeight;
+    }
+  }, [detail, selectedId, streamingText]);
 
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
 
@@ -198,7 +216,15 @@ export function App() {
               </div>
             </header>
 
-            <div className="messages">
+            <div
+              className="messages"
+              ref={messagesRef}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+                shouldFollowMessagesRef.current = distanceFromBottom < 80;
+              }}
+            >
               {detail.messages.length === 0 && (
                 <div className="empty-chat">
                   <div className="empty-icon">⌁</div>
@@ -214,10 +240,12 @@ export function App() {
               {streamingText && (
                 <div className="message assistant-message streaming">
                   <div className="avatar">A</div>
-                  <div className="message-body">{streamingText}<span className="cursor" /></div>
+                  <div className="message-body markdown-content">
+                    <MarkdownText>{streamingText}</MarkdownText>
+                    <span className="cursor" />
+                  </div>
                 </div>
               )}
-              <div ref={bottomRef} />
             </div>
 
             <Composer
@@ -225,6 +253,7 @@ export function App() {
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
               onSend={async (text) => {
                 setError(null);
+                shouldFollowMessagesRef.current = true;
                 try {
                   await api(`/api/sessions/${detail.session.id}/messages`, {
                     method: "POST",
@@ -292,7 +321,9 @@ function Message({ message }: { message: MessageView }) {
       return (
         <div className="message assistant-message">
           <div className="avatar">A</div>
-          <div className="message-body">{messageText(message)}</div>
+          <div className="message-body markdown-content">
+            <MarkdownText>{messageText(message)}</MarkdownText>
+          </div>
         </div>
       );
     }
@@ -307,8 +338,31 @@ function Message({ message }: { message: MessageView }) {
   return (
     <div className={`message ${message.role === "user" ? "user-message" : "assistant-message"} ${message.status === "queued" ? "queued" : ""}`}>
       {message.role === "assistant" && <div className="avatar">A</div>}
-      <div className="message-body">{messageText(message)}</div>
+      {message.role === "assistant" ? (
+        <div className="message-body markdown-content">
+          <MarkdownText>{messageText(message)}</MarkdownText>
+        </div>
+      ) : (
+        <div className="message-body">{messageText(message)}</div>
+      )}
     </div>
+  );
+}
+
+function MarkdownText({ children }: { children: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ children: linkText, ...props }) => (
+          <a {...props} target="_blank" rel="noreferrer noopener">
+            {linkText}
+          </a>
+        ),
+      }}
+    >
+      {children}
+    </ReactMarkdown>
   );
 }
 
