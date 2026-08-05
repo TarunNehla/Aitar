@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { resolve, sep } from "node:path";
 import type { NextFunction, Request, Response } from "express";
 import express from "express";
 import { z } from "zod";
-import { config } from "./config.js";
 import { errorForLog, httpLogger } from "./logger.js";
 import {
   createProject,
@@ -14,12 +12,12 @@ import {
   deleteQueuedMessage,
   finishRun,
   getActiveBranchMessages,
-  getArtifact,
   getActiveRunForSession,
+  getCheckpointForSession,
+  getLatestCheckpointForSession,
   getPendingApprovals,
   getRun,
   getSession,
-  listArtifacts,
   listEvents,
   listProjects,
   listSessionRuns,
@@ -166,13 +164,87 @@ export function createApi() {
         return;
       }
 
-      const [sessionMessages, sessionRuns, sessionArtifacts, approvals] = await Promise.all([
+      const [sessionMessages, sessionRuns, approvals] = await Promise.all([
         getActiveBranchMessages(sessionId),
         listSessionRuns(sessionId),
-        listArtifacts(sessionId),
         getPendingApprovals(sessionId),
       ]);
-      response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, artifacts: sessionArtifacts, approvals });
+      response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, approvals });
+    }),
+  );
+
+  app.get(
+    "/api/sessions/:sessionId/changes",
+    asyncRoute(async (request, response) => {
+      const sessionId = routeParam(request, "sessionId");
+      const relation = await getSession(sessionId);
+      if (!relation) {
+        response.status(404).json({ error: "Session not found" });
+        return;
+      }
+      if (!relation.workspace.baseCommit) {
+        response.status(409).json({ error: "Workspace is not ready" });
+        return;
+      }
+
+      const requestedCommit = typeof request.query.commit === "string"
+        ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
+        : undefined;
+      const checkpoint = requestedCommit
+        ? await getCheckpointForSession(sessionId, requestedCommit)
+        : await getLatestCheckpointForSession(sessionId);
+      if (requestedCommit && !checkpoint) {
+        response.status(404).json({ error: "Checkpoint not found" });
+        return;
+      }
+      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.workspace.baseCommit;
+      const baseCommit = requestedCommit && checkpoint
+        ? await workspaceManager.parentCommit(relation.workspace.localPath, checkpoint.checkpointCommit)
+        : checkpoint?.baseCommit ?? relation.workspace.baseCommit;
+      const changes = await workspaceManager.codeChanges(
+        relation.workspace.localPath,
+        baseCommit,
+        checkpointCommit,
+      );
+      response.json({ changes });
+    }),
+  );
+
+  app.get(
+    "/api/sessions/:sessionId/changes.patch",
+    asyncRoute(async (request, response) => {
+      const sessionId = routeParam(request, "sessionId");
+      const relation = await getSession(sessionId);
+      if (!relation) {
+        response.status(404).json({ error: "Session not found" });
+        return;
+      }
+      if (!relation.workspace.baseCommit) {
+        response.status(409).json({ error: "Workspace is not ready" });
+        return;
+      }
+
+      const requestedCommit = typeof request.query.commit === "string"
+        ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
+        : undefined;
+      const checkpoint = requestedCommit
+        ? await getCheckpointForSession(sessionId, requestedCommit)
+        : await getLatestCheckpointForSession(sessionId);
+      if (requestedCommit && !checkpoint) {
+        response.status(404).json({ error: "Checkpoint not found" });
+        return;
+      }
+      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.workspace.baseCommit;
+      const baseCommit = requestedCommit && checkpoint
+        ? await workspaceManager.parentCommit(relation.workspace.localPath, checkpoint.checkpointCommit)
+        : checkpoint?.baseCommit ?? relation.workspace.baseCommit;
+      const patch = await workspaceManager.patch(
+        relation.workspace.localPath,
+        baseCommit,
+        checkpointCommit,
+      );
+      response.setHeader("Content-Disposition", 'attachment; filename="changes.patch"');
+      response.type("text/x-diff").send(patch);
     }),
   );
 
@@ -234,6 +306,7 @@ export function createApi() {
       backlog.forEach(send);
       replaying = false;
       pending.sort((a, b) => a.sequence - b.sequence).forEach(send);
+      response.write("event: ready\ndata: {}\n\n");
 
       const heartbeat = setInterval(() => response.write(": keep-alive\n\n"), 15_000);
       request.on("close", () => {
@@ -271,26 +344,6 @@ export function createApi() {
       }
       approvalBroker.resolve(approval.id, input.approved);
       response.json({ approval });
-    }),
-  );
-
-  app.get(
-    "/api/artifacts/:artifactId",
-    asyncRoute(async (request, response) => {
-      const artifact = await getArtifact(routeParam(request, "artifactId"));
-      if (!artifact) {
-        response.status(404).json({ error: "Artifact not found" });
-        return;
-      }
-
-      const root = resolve(config.WORKSPACE_ROOT);
-      const file = resolve(artifact.storagePath);
-      if (file !== root && !file.startsWith(`${root}${sep}`)) {
-        response.status(403).json({ error: "Artifact path is outside storage" });
-        return;
-      }
-      response.type(artifact.mimeType ?? "application/octet-stream");
-      response.sendFile(file);
     }),
   );
 

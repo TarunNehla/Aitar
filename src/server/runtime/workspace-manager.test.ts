@@ -25,7 +25,7 @@ describe("workspace path safety", () => {
 });
 
 describe("Git checkpoints", () => {
-  it("captures new files in an internal commit and patch", async () => {
+  it("captures new files in an internal commit and generates changes from Git", async () => {
     const root = await mkdtemp(join(tmpdir(), "cloud-agent-checkpoint-"));
     temporaryPaths.push(root);
     temporaryPaths.push("/tmp/cloud-agents-tests/test-workspace");
@@ -50,6 +50,40 @@ describe("Git checkpoints", () => {
 
     expect(checkpoint.checkpointCommit).not.toBe(baseCommit);
     expect(checkpoint.changedFiles).toContainEqual({ status: "A", path: "new-file.txt" });
-    expect(checkpoint.patchSize).toBeGreaterThan(0);
+
+    const changes = await workspaceManager.codeChanges(repository, baseCommit, checkpoint.checkpointCommit);
+    expect(changes.files).toHaveLength(1);
+    expect(changes.files[0]).toMatchObject({ status: "added", path: "new-file.txt", additions: 1, deletions: 0 });
+    expect(changes.files[0]?.patch).toContain("+checkpointed");
+  });
+
+  it("reports modified, deleted, and renamed files with line counts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "cloud-agent-diff-"));
+    temporaryPaths.push(root);
+    const repository = join(root, "repository");
+    await mkdir(repository);
+    await runChecked("git", ["init", "-b", "main"], { cwd: repository });
+    await runChecked("git", ["config", "user.name", "Test"], { cwd: repository });
+    await runChecked("git", ["config", "user.email", "test@example.com"], { cwd: repository });
+    await writeFile(join(repository, "modify.txt"), "before\n");
+    await writeFile(join(repository, "delete.txt"), "remove me\n");
+    await writeFile(join(repository, "rename.txt"), "keep me\n");
+    await runChecked("git", ["add", "-A"], { cwd: repository });
+    await runChecked("git", ["commit", "-m", "initial"], { cwd: repository });
+    const baseCommit = (await runChecked("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
+
+    await writeFile(join(repository, "modify.txt"), "after\nextra\n");
+    await runChecked("git", ["rm", "delete.txt"], { cwd: repository });
+    await runChecked("git", ["mv", "rename.txt", "renamed.txt"], { cwd: repository });
+    await runChecked("git", ["add", "-A"], { cwd: repository });
+    await runChecked("git", ["commit", "-m", "changes"], { cwd: repository });
+    const checkpointCommit = (await runChecked("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
+
+    const changes = await workspaceManager.codeChanges(repository, baseCommit, checkpointCommit);
+    expect(changes.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "deleted", path: "delete.txt", deletions: 1 }),
+      expect.objectContaining({ status: "modified", path: "modify.txt", additions: 2, deletions: 1 }),
+      expect.objectContaining({ status: "renamed", previousPath: "rename.txt", path: "renamed.txt" }),
+    ]));
   });
 });

@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { MessageView, SessionEvent } from "../shared/contracts";
+import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
 
 interface SessionListItem {
@@ -19,14 +19,6 @@ interface Run {
   outputTokens: number;
 }
 
-interface Artifact {
-  id: string;
-  name: string;
-  type: string;
-  size: number;
-  metadata: Record<string, unknown>;
-}
-
 interface Approval {
   id: string;
   reason: string;
@@ -35,12 +27,11 @@ interface Approval {
 
 type TimelineItem =
   | { kind: "message"; id: string; createdAt: string; message: MessageView }
-  | { kind: "event"; id: string; createdAt: string; event: SessionEvent; reasoningCompleted: boolean };
+  | { kind: "event"; id: string; createdAt: string; event: SessionEvent; reasoningCompleted: boolean; changeCommit?: string };
 
 interface SessionDetail extends SessionListItem {
   messages: MessageView[];
   runs: Run[];
-  artifacts: Artifact[];
   approvals: Approval[];
 }
 
@@ -52,11 +43,6 @@ function messageText(message: MessageView): string {
     .map((block) => block.text)
     .filter(Boolean)
     .join("\n");
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  return `${(value / 1024).toFixed(1)} KB`;
 }
 
 function toolLabel(value: unknown): string {
@@ -79,7 +65,6 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "tool_started",
     "file_changed",
     "checkpoint_saved",
-    "artifact_created",
     "approval_requested",
     "approval_resolved",
   ]);
@@ -90,10 +75,20 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     createdAt: message.createdAt,
     message,
   }));
+  const seenCheckpointCommits = new Set<string>();
 
-  for (const event of events) {
+  for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
     if (!visibleTypes.has(event.type)) continue;
     if (event.type === "tool_started" && completedToolCalls.has(String(event.payload.callId ?? ""))) continue;
+    const commit = event.type === "checkpoint_saved" ? String(event.payload.commit ?? "") : "";
+    const changedFiles = Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles : [];
+    if (
+      event.type === "checkpoint_saved" &&
+      (!commit || changedFiles.length === 0 || event.payload.createdCommit === false || seenCheckpointCommits.has(commit))
+    ) {
+      continue;
+    }
+    if (commit) seenCheckpointCommits.add(commit);
     const reasoningCompleted =
       event.type === "reasoning_started" &&
       reasoningCompletions.some(
@@ -105,6 +100,7 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
       createdAt: event.createdAt,
       event,
       reasoningCompleted,
+      ...(commit ? { changeCommit: commit } : {}),
     });
   }
 
@@ -120,6 +116,7 @@ export function App() {
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [changesByCommit, setChangesByCommit] = useState<Record<string, CodeChanges>>({});
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [loading, setLoading] = useState(true);
@@ -127,6 +124,10 @@ export function App() {
   const messagesRef = useRef<HTMLDivElement>(null);
   const shouldFollowMessagesRef = useRef(true);
   const renderedSessionRef = useRef<string | null>(null);
+  const requestedChangesRef = useRef(new Set<string>());
+  const selectedSessionRef = useRef<string | null>(null);
+  const eventReplayReadyRef = useRef(false);
+  selectedSessionRef.current = selectedId;
 
   const loadSessions = useCallback(async () => {
     const result = await api<{ sessions: SessionListItem[] }>("/api/sessions");
@@ -149,16 +150,24 @@ export function App() {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setChangesByCommit({});
+      requestedChangesRef.current.clear();
       return;
     }
     setDetail((current) => current?.session.id === selectedId ? current : null);
+    setChangesByCommit({});
+    requestedChangesRef.current.clear();
     setEvents([]);
     setStreamingText("");
+    eventReplayReadyRef.current = false;
     shouldFollowMessagesRef.current = true;
     renderedSessionRef.current = null;
     loadDetail(selectedId).catch((reason) => setError(reason.message));
 
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
+    source.addEventListener("ready", () => {
+      eventReplayReadyRef.current = true;
+    });
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent;
       setEvents((current) => {
@@ -166,18 +175,18 @@ export function App() {
         return [...current, event].slice(-300);
       });
 
-      if (event.type === "assistant_text_delta") {
+      if (eventReplayReadyRef.current && event.type === "assistant_text_delta") {
         setStreamingText((current) => current + String(event.payload.delta ?? ""));
       }
 
       if (
+        eventReplayReadyRef.current &&
         [
           "assistant_message_completed",
           "run_completed",
           "run_failed",
           "approval_requested",
           "approval_resolved",
-          "artifact_created",
         ].includes(event.type)
       ) {
         if (event.type === "assistant_message_completed") setStreamingText("");
@@ -190,6 +199,37 @@ export function App() {
     };
     return () => source.close();
   }, [selectedId, loadDetail, loadSessions]);
+
+  const timeline = useMemo(
+    () => buildTimeline(detail?.messages ?? [], events),
+    [detail?.messages, events],
+  );
+  const checkpointCommits = useMemo(
+    () => timeline.flatMap((item) => item.kind === "event" && item.changeCommit ? [item.changeCommit] : []),
+    [timeline],
+  );
+
+  useEffect(() => {
+    if (!selectedId || detail?.session.id !== selectedId) return;
+
+    for (const commit of checkpointCommits) {
+      const requestKey = `${selectedId}:${commit}`;
+      if (requestedChangesRef.current.has(requestKey)) continue;
+      requestedChangesRef.current.add(requestKey);
+
+      void api<{ changes: CodeChanges }>(
+        `/api/sessions/${selectedId}/changes?commit=${encodeURIComponent(commit)}`,
+      )
+        .then((result) => {
+          if (selectedSessionRef.current !== selectedId) return;
+          setChangesByCommit((current) => ({ ...current, [commit]: result.changes }));
+        })
+        .catch((reason) => {
+          if (selectedSessionRef.current !== selectedId) return;
+          setError(reason instanceof Error ? reason.message : String(reason));
+        });
+    }
+  }, [checkpointCommits, detail?.session.id, selectedId]);
 
   useLayoutEffect(() => {
     const messages = messagesRef.current;
@@ -204,18 +244,9 @@ export function App() {
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
-  }, [detail, selectedId, streamingText]);
+  }, [changesByCommit, detail, selectedId, streamingText]);
 
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
-  const timeline = useMemo(
-    () => buildTimeline(detail?.messages ?? [], events),
-    [detail?.messages, events],
-  );
-  const timelineArtifactIds = useMemo(
-    () => new Set(events.filter((event) => event.type === "artifact_created").map((event) => String(event.payload.artifactId ?? ""))),
-    [events],
-  );
-
   if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
 
   if (sessions.length === 0) {
@@ -309,18 +340,21 @@ export function App() {
                 item.kind === "message" ? (
                   <Message key={item.id} message={item.message} />
                 ) : (
-                  <TimelineEvent
-                    key={item.id}
-                    event={item.event}
-                    reasoningCompleted={item.reasoningCompleted}
-                    artifacts={detail.artifacts}
-                  />
+                  <Fragment key={item.id}>
+                    <TimelineEvent
+                      event={item.event}
+                      reasoningCompleted={item.reasoningCompleted}
+                    />
+                    {item.changeCommit && changesByCommit[item.changeCommit] && (
+                      <CodeChangesCard
+                        changes={changesByCommit[item.changeCommit]}
+                        sessionId={detail.session.id}
+                        commit={item.changeCommit}
+                      />
+                    )}
+                  </Fragment>
                 ),
               )}
-
-              {detail.artifacts
-                .filter((artifact) => !timelineArtifactIds.has(artifact.id))
-                .map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
 
               {detail.approvals.map((approval) => (
                 <ApprovalCard
@@ -487,17 +521,10 @@ function Composer({
 function TimelineEvent({
   event,
   reasoningCompleted,
-  artifacts,
 }: {
   event: SessionEvent;
   reasoningCompleted: boolean;
-  artifacts: Artifact[];
 }) {
-  if (event.type === "artifact_created") {
-    const artifact = artifacts.find((candidate) => candidate.id === String(event.payload.artifactId ?? ""));
-    if (artifact) return <ArtifactCard artifact={artifact} />;
-  }
-
   let icon = "✓";
   let title = event.type.replaceAll("_", " ");
   let detail = "";
@@ -555,15 +582,96 @@ function TimelineEvent({
   );
 }
 
-function ArtifactCard({ artifact }: { artifact: Artifact }) {
+type DiffLine = {
+  kind: "added" | "deleted" | "context" | "hunk" | "meta";
+  content: string;
+  oldNumber: number | null;
+  newNumber: number | null;
+};
+
+function diffLines(patch: string): DiffLine[] {
+  const output: DiffLine[] = [];
+  let oldNumber = 0;
+  let newNumber = 0;
+  let insideHunk = false;
+
+  for (const line of patch.split("\n")) {
+    if (line.startsWith("@@")) {
+      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (match) {
+        oldNumber = Number(match[1]);
+        newNumber = Number(match[2]);
+      }
+      insideHunk = true;
+      output.push({ kind: "hunk", content: line, oldNumber: null, newNumber: null });
+      continue;
+    }
+    if (!insideHunk) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      output.push({ kind: "added", content: line.slice(1), oldNumber: null, newNumber: newNumber++ });
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      output.push({ kind: "deleted", content: line.slice(1), oldNumber: oldNumber++, newNumber: null });
+    } else if (line.startsWith(" ")) {
+      output.push({ kind: "context", content: line.slice(1), oldNumber: oldNumber++, newNumber: newNumber++ });
+    } else if (line.startsWith("\\")) {
+      output.push({ kind: "meta", content: line, oldNumber: null, newNumber: null });
+    }
+  }
+  return output;
+}
+
+function statusLabel(file: FileChange): string {
+  if (file.status === "type_changed") return "Type changed";
+  return `${file.status.charAt(0).toUpperCase()}${file.status.slice(1)}`;
+}
+
+function CodeChangesCard({ changes, sessionId, commit }: { changes: CodeChanges; sessionId: string; commit: string }) {
   return (
-    <a className="artifact inline-artifact" href={`/api/artifacts/${artifact.id}`} target="_blank" rel="noreferrer">
-      <span className="artifact-icon">↗</span>
-      <span>
-        <strong>{artifact.name}</strong>
-        <small>{formatBytes(artifact.size)} · Download artifact</small>
-      </span>
-    </a>
+    <section className="code-changes">
+      <header className="changes-header">
+        <span className="changes-icon">±</span>
+        <span>
+          <strong>Code changes</strong>
+          <small>{changes.files.length} {changes.files.length === 1 ? "file" : "files"} changed</small>
+        </span>
+        <span className="change-totals"><b>+{changes.additions}</b><i>−{changes.deletions}</i></span>
+        <a href={`/api/sessions/${sessionId}/changes.patch?commit=${encodeURIComponent(commit)}`} download>Download patch</a>
+      </header>
+
+      <div className="changed-files">
+        {changes.files.map((file) => {
+          const lines = diffLines(file.patch);
+          return (
+            <details className="changed-file" key={`${file.statusCode}-${file.path}`}>
+              <summary>
+                <span className={`change-status ${file.status}`} title={statusLabel(file)}>{file.statusCode.charAt(0)}</span>
+                <span className="change-path">
+                  <strong>{file.path}</strong>
+                  {file.previousPath && <small>from {file.previousPath}</small>}
+                </span>
+                <span className="file-totals"><b>+{file.additions}</b><i>−{file.deletions}</i></span>
+                <span className="chevron">⌄</span>
+              </summary>
+              <div className="diff-view">
+                {file.binary ? (
+                  <p className="binary-change">Binary file changed.</p>
+                ) : lines.length > 0 ? (
+                  lines.map((line, index) => (
+                    <div className={`diff-line ${line.kind}`} key={`${index}-${line.kind}`}>
+                      <span>{line.oldNumber ?? ""}</span>
+                      <span>{line.newNumber ?? ""}</span>
+                      <code>{line.kind === "added" ? "+" : line.kind === "deleted" ? "−" : " "}{line.content}</code>
+                    </div>
+                  ))
+                ) : (
+                  <p className="binary-change">No text lines changed.</p>
+                )}
+              </div>
+            </details>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

@@ -38,3 +38,24 @@ export interface MessageView {
   createdAt: string;
   blocks: MessageBlockView[];
 }
+
+export type FileChangeStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "type_changed";
+
+export interface FileChange {
+  status: FileChangeStatus;
+  statusCode: string;
+  path: string;
+  previousPath?: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  patch: string;
+}
+
+export interface CodeChanges {
+  baseCommit: string;
+  checkpointCommit: string;
+  additions: number;
+  deletions: number;
+  files: FileChange[];
+}

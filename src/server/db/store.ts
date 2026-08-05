@@ -649,6 +649,28 @@ export async function saveCheckpoint(input: {
   return checkpoint;
 }
 
+export async function getLatestCheckpointForSession(sessionId: string) {
+  const [result] = await db
+    .select({ checkpoint: workspaceCheckpoints })
+    .from(workspaceCheckpoints)
+    .innerJoin(runs, eq(workspaceCheckpoints.runId, runs.id))
+    .where(eq(runs.sessionId, sessionId))
+    .orderBy(desc(workspaceCheckpoints.createdAt))
+    .limit(1);
+  return result?.checkpoint;
+}
+
+export async function getCheckpointForSession(sessionId: string, checkpointCommit: string) {
+  const [result] = await db
+    .select({ checkpoint: workspaceCheckpoints })
+    .from(workspaceCheckpoints)
+    .innerJoin(runs, eq(workspaceCheckpoints.runId, runs.id))
+    .where(and(eq(runs.sessionId, sessionId), eq(workspaceCheckpoints.checkpointCommit, checkpointCommit)))
+    .orderBy(desc(workspaceCheckpoints.createdAt))
+    .limit(1);
+  return result?.checkpoint;
+}
+
 export async function saveArtifact(input: {
   workspaceId: string;
   sessionId?: string;

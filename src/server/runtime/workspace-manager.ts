@@ -1,5 +1,6 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
+import type { CodeChanges, FileChangeStatus } from "../../shared/contracts.js";
 import { config } from "../config.js";
 import { errorForLog, logger } from "../logger.js";
 import { runChecked, runProcess, type ProcessResult } from "./process.js";
@@ -9,7 +10,6 @@ const workspaceLogger = logger.child({ component: "workspace-manager" });
 export interface WorkspaceLocation {
   root: string;
   repository: string;
-  artifacts: string;
 }
 
 export function workspaceLocation(workspaceId: string): WorkspaceLocation {
@@ -17,7 +17,6 @@ export function workspaceLocation(workspaceId: string): WorkspaceLocation {
   return {
     root,
     repository: join(root, "repository"),
-    artifacts: join(root, "artifacts"),
   };
 }
 
@@ -56,7 +55,6 @@ export class WorkspaceManager {
     const url = validateRepositoryUrl(input.repositoryUrl);
     const location = workspaceLocation(input.workspaceId);
     await mkdir(location.root, { recursive: true });
-    await mkdir(location.artifacts, { recursive: true });
 
     await runChecked("git", [
       "clone",
@@ -259,8 +257,9 @@ export class WorkspaceManager {
   async checkpoint(input: { workspaceId: string; repositoryPath: string; runId: string; baseCommit: string }) {
     await runChecked("git", ["add", "-A"], { cwd: input.repositoryPath });
     const staged = await runChecked("git", ["diff", "--cached", "--quiet"], { cwd: input.repositoryPath }).catch(() => null);
+    const createdCommit = !staged;
 
-    if (!staged) {
+    if (createdCommit) {
       await runChecked("git", ["commit", "--no-verify", "-m", `checkpoint: ${input.runId}`], {
         cwd: input.repositoryPath,
       });
@@ -270,15 +269,6 @@ export class WorkspaceManager {
       await runChecked("git", ["rev-parse", "HEAD"], { cwd: input.repositoryPath })
     ).stdout.trim();
     const internalRef = `refs/heads/cloud-agent/${input.workspaceId}`;
-    const patch = (
-      await runChecked("git", ["diff", "--binary", `${input.baseCommit}..${checkpointCommit}`], {
-        cwd: input.repositoryPath,
-      })
-    ).stdout;
-    const location = workspaceLocation(input.workspaceId);
-    await mkdir(location.artifacts, { recursive: true });
-    const patchPath = join(location.artifacts, `${input.runId}-${checkpointCommit.slice(0, 8)}.patch`);
-    await writeFile(patchPath, patch, "utf8");
     const changedFiles = await this.changedFiles(input.repositoryPath, input.baseCommit, checkpointCommit);
 
     workspaceLogger.info(
@@ -286,7 +276,6 @@ export class WorkspaceManager {
         workspaceId: input.workspaceId,
         runId: input.runId,
         changedFileCount: changedFiles.length,
-        patchBytes: Buffer.byteLength(patch),
       },
       "Workspace checkpoint saved",
     );
@@ -294,23 +283,81 @@ export class WorkspaceManager {
     return {
       checkpointCommit,
       internalRef,
-      patchPath,
-      patchSize: Buffer.byteLength(patch),
+      createdCommit,
       changedFiles,
     };
   }
 
   async changedFiles(repositoryPath: string, baseCommit: string, checkpointCommit = "HEAD") {
-    const result = await runChecked("git", ["diff", "--name-status", `${baseCommit}..${checkpointCommit}`], {
+    const result = await runChecked("git", ["diff", "--find-renames", "--name-status", "-z", `${baseCommit}..${checkpointCommit}`], {
       cwd: repositoryPath,
     });
-    return result.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const [status, ...parts] = line.split("\t");
-        return { status, path: parts.at(-1) ?? "" };
-      });
+    const parts = result.stdout.split("\0");
+    const files: Array<{ status: string; path: string; previousPath?: string }> = [];
+    let index = 0;
+    while (index < parts.length && parts[index]) {
+      const status = parts[index++] ?? "M";
+      if (status.startsWith("R") || status.startsWith("C")) {
+        const previousPath = parts[index++] ?? "";
+        const path = parts[index++] ?? "";
+        files.push({ status, path, previousPath });
+      } else {
+        files.push({ status, path: parts[index++] ?? "" });
+      }
+    }
+    return files;
+  }
+
+  async codeChanges(repositoryPath: string, baseCommit: string, checkpointCommit: string): Promise<CodeChanges> {
+    const changedFiles = await this.changedFiles(repositoryPath, baseCommit, checkpointCommit);
+    const patch = await this.patch(repositoryPath, baseCommit, checkpointCommit, false);
+    const starts = [...patch.matchAll(/^diff --git /gm)].map((match) => match.index);
+    const sections = starts.map((start, index) => patch.slice(start, starts[index + 1] ?? patch.length).trimEnd());
+
+    const files = changedFiles.map((file, index) => {
+      const filePatch = sections[index] ?? "";
+      const lines = filePatch.split("\n");
+      const additions = lines.filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+      const deletions = lines.filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
+      const statusCode = file.status.charAt(0);
+      const statuses: Record<string, FileChangeStatus> = {
+        A: "added",
+        C: "copied",
+        D: "deleted",
+        M: "modified",
+        R: "renamed",
+        T: "type_changed",
+      };
+      return {
+        status: statuses[statusCode] ?? "modified",
+        statusCode: file.status,
+        path: file.path,
+        ...(file.previousPath ? { previousPath: file.previousPath } : {}),
+        additions,
+        deletions,
+        binary: filePatch.includes("Binary files") || filePatch.includes("GIT binary patch"),
+        patch: filePatch,
+      };
+    });
+
+    return {
+      baseCommit,
+      checkpointCommit,
+      additions: files.reduce((total, file) => total + file.additions, 0),
+      deletions: files.reduce((total, file) => total + file.deletions, 0),
+      files,
+    };
+  }
+
+  async parentCommit(repositoryPath: string, checkpointCommit: string): Promise<string> {
+    return (await runChecked("git", ["rev-parse", `${checkpointCommit}^`], { cwd: repositoryPath })).stdout.trim();
+  }
+
+  async patch(repositoryPath: string, baseCommit: string, checkpointCommit: string, binary = true): Promise<string> {
+    const argumentsList = ["diff", "--find-renames", "--no-ext-diff", "--no-color"];
+    if (binary) argumentsList.push("--binary");
+    argumentsList.push("--unified=3", `${baseCommit}..${checkpointCommit}`);
+    return (await runChecked("git", argumentsList, { cwd: repositoryPath })).stdout;
   }
 
   relativePath(repositoryPath: string, absolutePath: string): string {

@@ -7,7 +7,6 @@ import {
   type ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { stat } from "node:fs/promises";
 import { config } from "../config.js";
 import {
   appendEvent,
@@ -21,7 +20,6 @@ import {
   newWorkerId,
   recoverStaleRuns,
   renewRunLease,
-  saveArtifact,
   saveCheckpoint,
   startToolExecution,
 } from "../db/store.js";
@@ -261,28 +259,29 @@ export class AgentWorker {
     let costUsd = 0;
     let turns = 0;
     let parentMessageId = relation.session.currentLeafMessageId;
-    let lastCheckpoint: Awaited<ReturnType<typeof workspaceManager.checkpoint>> | null = null;
 
     const checkpoint = async () => {
       if (!relation.workspace.baseCommit) return null;
-      lastCheckpoint = await workspaceManager.checkpoint({
+      const result = await workspaceManager.checkpoint({
         workspaceId: relation.workspace.id,
         repositoryPath: relation.workspace.localPath,
         runId: run.id,
         baseCommit: relation.workspace.baseCommit,
       });
+      if (!result.createdCommit) return null;
       await saveCheckpoint({
         workspaceId: relation.workspace.id,
         runId: run.id,
         baseCommit: relation.workspace.baseCommit,
-        checkpointCommit: lastCheckpoint.checkpointCommit,
-        internalRef: lastCheckpoint.internalRef,
+        checkpointCommit: result.checkpointCommit,
+        internalRef: result.internalRef,
       });
       await writer.emit("checkpoint_saved", {
-        commit: lastCheckpoint.checkpointCommit,
-        changedFiles: lastCheckpoint.changedFiles,
+        commit: result.checkpointCommit,
+        createdCommit: true,
+        changedFiles: result.changedFiles,
       });
-      return lastCheckpoint;
+      return result;
     };
 
     try {
@@ -350,23 +349,7 @@ export class AgentWorker {
       if (agent.state.errorMessage && !agent.state.errorMessage.toLowerCase().includes("abort")) {
         throw new Error(agent.state.errorMessage);
       }
-      const finalCheckpoint = await checkpoint();
-
-      if (finalCheckpoint) {
-        const patchFile = await stat(finalCheckpoint.patchPath);
-        const artifact = await saveArtifact({
-          workspaceId: relation.workspace.id,
-          sessionId: run.session_id,
-          runId: run.id,
-          name: "changes.patch",
-          type: "git_patch",
-          mimeType: "text/x-diff",
-          storagePath: finalCheckpoint.patchPath,
-          size: patchFile.size,
-          metadata: { commit: finalCheckpoint.checkpointCommit, changedFiles: finalCheckpoint.changedFiles },
-        });
-        await writer.emit("artifact_created", { artifactId: artifact.id, name: artifact.name, type: artifact.type });
-      }
+      await checkpoint();
 
       const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
       await finishRun({ runId: run.id, status, inputTokens, outputTokens, costUsd });
