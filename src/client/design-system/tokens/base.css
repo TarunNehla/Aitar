@@ -1,0 +1,41 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface-app);
+  color: var(--text-body);
+  font: var(--type-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "cv11", "ss01";
+}
+
+h1, h2, h3, h4, h5, h6, p, figure { margin: 0; }
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+a:hover { color: var(--text-link-hover); text-decoration: underline; text-underline-offset: 2px; }
+
+button, input, textarea, select { font: inherit; color: inherit; }
+
+::selection { background: var(--teal-100); color: var(--teal-700); }
+
+:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-xs); }
+
+code, kbd, pre, samp { font-family: var(--font-mono); }
+
+/* Scrollbars — thin, appear on hover of the scrolling region */
+.ds-scroll { scrollbar-width: thin; scrollbar-color: var(--gray-300) transparent; }
+.ds-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.ds-scroll::-webkit-scrollbar-thumb {
+  background: var(--gray-200);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+}
+.ds-scroll:hover::-webkit-scrollbar-thumb { background: var(--gray-300); background-clip: content-box; }
+.ds-scroll::-webkit-scrollbar-track { background: transparent; }

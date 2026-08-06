@@ -1,0 +1,12 @@
+:root {
+  --shadow-none: none;
+  --shadow-xs: 0 1px 2px rgba(20, 24, 29, 0.05);
+  --shadow-sm: 0 1px 3px rgba(20, 24, 29, 0.06), 0 1px 2px -1px rgba(20, 24, 29, 0.05);
+  --shadow-md: 0 4px 14px -4px rgba(20, 24, 29, 0.10), 0 1px 3px rgba(20, 24, 29, 0.04);
+  --shadow-lg: 0 14px 36px -10px rgba(20, 24, 29, 0.16), 0 2px 6px rgba(20, 24, 29, 0.05);
+  --shadow-xl: 0 28px 64px -16px rgba(20, 24, 29, 0.22), 0 4px 10px rgba(20, 24, 29, 0.06);
+
+  /* Inset lines used instead of shadows on flat surfaces */
+  --inset-top:    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+  --inset-hairline: inset 0 0 0 1px var(--border-hairline);
+}

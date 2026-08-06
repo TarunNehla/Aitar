@@ -1,0 +1,29 @@
+:root {
+  --space-0:  0px;
+  --space-1:  2px;
+  --space-2:  4px;
+  --space-3:  6px;
+  --space-4:  8px;
+  --space-5:  10px;
+  --space-6:  12px;
+  --space-7:  16px;
+  --space-8:  20px;
+  --space-9:  24px;
+  --space-10: 32px;
+  --space-11: 40px;
+  --space-12: 48px;
+  --space-13: 64px;
+  --space-14: 80px;
+  --space-15: 112px;
+
+  /* Layout constants */
+  --rail-width:        56px;
+  --sidebar-width:     264px;
+  --sidebar-width-wide: 300px;
+  --inspector-width:   340px;
+  --topbar-height:     52px;
+  --composer-max:      760px;
+  --thread-max:        760px;
+  --content-max:       1180px;
+  --gutter:            var(--space-9);
+}

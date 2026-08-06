@@ -1,0 +1,23 @@
+:root {
+  --dur-instant: 90ms;
+  --dur-fast:    140ms;
+  --dur-base:    200ms;
+  --dur-slow:    320ms;
+  --dur-lazy:    520ms;
+
+  --ease-out:   cubic-bezier(0.22, 0.8, 0.28, 1);
+  --ease-in-out: cubic-bezier(0.5, 0, 0.3, 1);
+  --ease-entrance: cubic-bezier(0.16, 0.9, 0.2, 1);
+
+  --transition-control: background-color var(--dur-fast) var(--ease-out),
+                        border-color var(--dur-fast) var(--ease-out),
+                        color var(--dur-fast) var(--ease-out),
+                        box-shadow var(--dur-fast) var(--ease-out);
+}
+
+@keyframes ds-fade-in { from { opacity: 0 } to { opacity: 1 } }
+@keyframes ds-rise-in { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: none } }
+@keyframes ds-spin { to { transform: rotate(360deg) } }
+@keyframes ds-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+@keyframes ds-shimmer { from { background-position: -180% 0 } to { background-position: 180% 0 } }
+@keyframes ds-caret { 0%, 45% { opacity: 1 } 55%, 100% { opacity: 0 } }

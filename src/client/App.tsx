@@ -1,8 +1,9 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
+import { Icon, type IconName } from "./components/Icon";
 
 interface Repository {
   id: string;
@@ -46,6 +47,13 @@ type TimelineItem =
   | { kind: "message"; id: string; createdAt: string; message: MessageView }
   | { kind: "event"; id: string; createdAt: string; event: SessionEvent; reasoningCompleted: boolean; changeCommit?: string };
 
+type EventItem = Extract<TimelineItem, { kind: "event" }>;
+
+/** A finished run collapses behind one summary line; everything else renders in place. */
+type ThreadNode =
+  | { kind: "item"; item: TimelineItem }
+  | { kind: "group"; id: string; label: string; items: EventItem[] };
+
 interface SessionDetail extends SessionListItem {
   messages: MessageView[];
   runs: Run[];
@@ -65,6 +73,89 @@ function messageText(message: MessageView): string {
 
 function toolLabel(value: unknown): string {
   return String(value ?? "Tool").replaceAll("_", " ");
+}
+
+function sentenceCase(value: string): string {
+  const text = value.replaceAll("_", " ");
+  return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+}
+
+function formatDuration(startedAt: string, endedAt: string): string {
+  const elapsed = new Date(endedAt).getTime() - new Date(startedAt).getTime();
+  const totalSeconds = Math.max(1, Math.round(Math.max(0, elapsed) / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${totalSeconds % 60}s`;
+  return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
+}
+
+// Run lifecycle events describe the run itself, so they become the group summary
+// rather than lines inside it.
+const runLifecycleTypes = new Set(["run_started", "run_completed"]);
+// A checkpoint labels its diff card and a failure needs reading, so neither collapses.
+const uncollapsibleTypes = new Set(["checkpoint_saved", "run_failed"]);
+
+/**
+ * Groups the steps of a finished run behind a single "Worked for 4m 13s" line.
+ * While a run is still going its steps stay expanded so there is something to watch.
+ */
+function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNode[] {
+  const runs = new Map<string, { startedAt?: string; endedAt?: string; finished: boolean }>();
+  for (const event of events) {
+    if (!event.runId) continue;
+    const run = runs.get(event.runId) ?? { finished: false };
+    if (event.type === "run_started") run.startedAt = event.createdAt;
+    if (event.type === "run_completed" || event.type === "run_failed") {
+      run.endedAt = event.createdAt;
+      run.finished = true;
+    }
+    runs.set(event.runId, run);
+  }
+
+  const nodes: ThreadNode[] = [];
+  let pending: EventItem[] = [];
+  let pendingRunId: string | null = null;
+
+  function flush() {
+    if (pending.length === 0) {
+      pendingRunId = null;
+      return;
+    }
+    const run = pendingRunId ? runs.get(pendingRunId) : undefined;
+    const startedAt = run?.startedAt ?? pending[0].createdAt;
+    const endedAt = run?.endedAt ?? pending[pending.length - 1].createdAt;
+    nodes.push({
+      kind: "group",
+      id: `group-${pending[0].id}`,
+      label: `Worked for ${formatDuration(startedAt, endedAt)}`,
+      items: pending,
+    });
+    pending = [];
+    pendingRunId = null;
+  }
+
+  for (const item of timeline) {
+    if (item.kind === "message") {
+      flush();
+      nodes.push({ kind: "item", item });
+      continue;
+    }
+
+    const finished = item.event.runId ? runs.get(item.event.runId)?.finished ?? false : false;
+    if (!finished || uncollapsibleTypes.has(item.event.type)) {
+      flush();
+      nodes.push({ kind: "item", item });
+      continue;
+    }
+    if (runLifecycleTypes.has(item.event.type)) continue;
+
+    if (pendingRunId && pendingRunId !== item.event.runId) flush();
+    pendingRunId = item.event.runId;
+    pending.push(item);
+  }
+  flush();
+
+  return nodes;
 }
 
 function buildTimeline(messages: MessageView[], events: SessionEvent[]): TimelineItem[] {
@@ -254,6 +345,7 @@ export function App() {
     () => buildTimeline(detail?.messages ?? [], events),
     [detail?.messages, events],
   );
+  const thread = useMemo(() => buildThread(timeline, events), [timeline, events]);
   const checkpointCommits = useMemo(
     () => timeline.flatMap((item) => item.kind === "event" && item.changeCommit ? [item.changeCommit] : []),
     [timeline],
@@ -325,22 +417,21 @@ export function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
+        {/* No brand mark exists for this product — the name is set in plain type. */}
         <div className="brand">
-          <span className="brand-mark">C</span>
-          <div>
-            <strong>Cloud Agents</strong>
-            <small>Private repositories</small>
-          </div>
+          <span className="brand-placeholder" />
+          <strong>Cloud Agents</strong>
         </div>
 
-        <div className="session-list">
+        <div className="session-list ds-scroll">
           <p className="eyebrow">Repositories</p>
           {sessionsByRepository.map((group) => (
             <div className="repository-group" key={group.repository.id}>
               <div className="repository-title">
                 <strong>{group.repository.name}</strong>
                 <button
-                  title="New chat"
+                  aria-label={`New session in ${group.repository.name}`}
+                  title="New session"
                   onClick={async () => {
                     const result = await api<{ session: { id: string } }>(
                       `/api/repositories/${group.repository.id}/chats`,
@@ -355,7 +446,9 @@ export function App() {
                     await loadSessions();
                     setSelectedId(result.session.id);
                   }}
-                >+</button>
+                >
+                  <Icon name="plus" size={14} />
+                </button>
               </div>
               {group.sessions.map((item) => (
                 <button
@@ -390,7 +483,8 @@ export function App() {
               setSelectedId(result.session.id);
             }}
           >
-            + New session
+            <Icon name="plus" size={16} />
+            New session
           </button>
         )}
       </aside>
@@ -399,26 +493,36 @@ export function App() {
         {detail ? (
           <>
             <header className="conversation-header">
-              <div>
+              <div className="conversation-title">
                 <h1>{detail.session.title}</h1>
-                <a href={detail.repository.repositoryUrl} target="_blank" rel="noreferrer">
-                  {detail.repository.name} ↗
+                <a
+                  className="repository-link"
+                  href={detail.repository.repositoryUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {detail.repository.name}
+                  <Icon name="external-link" size={14} />
                 </a>
-                <code className="branch-label">{detail.session.branchName}</code>
+                <code className="branch-label">
+                  <Icon name="git-branch" size={14} />
+                  {detail.session.branchName}
+                </code>
                 {detail.session.baseCommit && (
                   <span className="base-label">
-                    Base {detail.session.baseBranch} · {detail.session.baseCommit.slice(0, 7)}
+                    {detail.session.baseBranch} · {detail.session.baseCommit.slice(0, 7)}
                   </span>
                 )}
+                <span className="model-label">{detail.session.defaultModel}</span>
               </div>
               <div className={`run-state ${activeRun ? "working" : "ready"}`}>
                 <span />
-                {activeRun ? activeRun.status.replaceAll("_", " ") : "Ready"}
+                <small>{activeRun ? sentenceCase(activeRun.status) : "Ready"}</small>
               </div>
             </header>
 
             <div
-              className="messages"
+              className="messages ds-scroll"
               ref={messagesRef}
               onScroll={(event) => {
                 const element = event.currentTarget;
@@ -426,29 +530,42 @@ export function App() {
                 shouldFollowMessagesRef.current = distanceFromBottom < 80;
               }}
             >
+              <div className="thread">
               {timeline.length === 0 && (
                 <div className="empty-chat">
-                  <div className="empty-icon">⌁</div>
+                  <div className="empty-icon">
+                    <Icon name="sparkles" size={20} />
+                  </div>
                   <h2>What should the agent build?</h2>
                   <p>The agent can inspect files, edit code, run commands, and test its work.</p>
                 </div>
               )}
 
-              {timeline.map((item) =>
-                item.kind === "message" ? (
-                  <Message key={item.id} message={item.message} />
+              {thread.map((node) =>
+                node.kind === "group" ? (
+                  <StepGroup key={node.id} label={node.label}>
+                    {node.items.map((item) => (
+                      <TimelineEvent
+                        key={item.id}
+                        event={item.event}
+                        reasoningCompleted={item.reasoningCompleted}
+                      />
+                    ))}
+                  </StepGroup>
+                ) : node.item.kind === "message" ? (
+                  <Message key={node.item.id} message={node.item.message} />
                 ) : (
-                  <Fragment key={item.id}>
+                  <Fragment key={node.item.id}>
                     <TimelineEvent
-                      event={item.event}
-                      reasoningCompleted={item.reasoningCompleted}
-                      liveOutput={liveToolOutput[String(item.event.payload.callId ?? "")]}
+                      event={node.item.event}
+                      reasoningCompleted={node.item.reasoningCompleted}
+                      liveOutput={liveToolOutput[String(node.item.event.payload.callId ?? "")]}
                     />
-                    {item.changeCommit && changesByCommit[item.changeCommit] && (
+                    {node.item.changeCommit && changesByCommit[node.item.changeCommit] && (
                       <CodeChangesCard
-                        changes={changesByCommit[item.changeCommit]}
+                        changes={changesByCommit[node.item.changeCommit]}
                         sessionId={detail.session.id}
-                        commit={item.changeCommit}
+                        commit={node.item.changeCommit}
                       />
                     )}
                   </Fragment>
@@ -471,13 +588,13 @@ export function App() {
 
               {streamingText && (
                 <div className="message assistant-message streaming">
-                  <div className="avatar">A</div>
                   <div className="message-body markdown-content">
                     <MarkdownText>{streamingText}</MarkdownText>
                     <span className="cursor" />
                   </div>
                 </div>
               )}
+              </div>
             </div>
 
             <Composer
@@ -501,7 +618,7 @@ export function App() {
             {error && <div className="toast">{error}</div>}
           </>
         ) : (
-          <div className="center-state">Start a chat from a repository in the sidebar.</div>
+          <div className="center-state">Select a session, or start a new one from the sidebar.</div>
         )}
       </main>
     </div>
@@ -514,36 +631,60 @@ function Message({ message }: { message: MessageView }) {
     if (block?.data.toolName === "finish") {
       return (
         <div className="message assistant-message">
-          <div className="avatar">A</div>
           <div className="message-body markdown-content">
             <MarkdownText>{messageText(message)}</MarkdownText>
           </div>
         </div>
       );
     }
+    const failed = Boolean(block?.data.isError);
     return (
-      <details className={`tool-message ${block?.data.isError ? "failed" : ""}`}>
+      <details className={`tool-message ${failed ? "failed" : ""}`}>
         <summary>
-          <span className="tool-icon">›</span>
-          <span>{toolLabel(block?.data.toolName)}</span>
-          <small>{block?.data.isError ? "Failed" : "Completed"}</small>
+          <span className="chevron">
+            <Icon name="chevron-right" size={14} />
+          </span>
+          <span className="tool-icon">
+            <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
+          </span>
+          <span className="timeline-event-verb">{toolLabel(block?.data.toolName)}</span>
+          <span className="timeline-event-detail">{failed ? "Failed" : "Completed"}</span>
         </summary>
         <pre>{messageText(message)}</pre>
       </details>
     );
   }
 
-  return (
-    <div className={`message ${message.role === "user" ? "user-message" : "assistant-message"} ${message.status === "queued" ? "queued" : ""}`}>
-      {message.role === "assistant" && <div className="avatar">A</div>}
-      {message.role === "assistant" ? (
-        <div className="message-body markdown-content">
-          <MarkdownText>{messageText(message)}</MarkdownText>
-        </div>
-      ) : (
+  if (message.role === "user") {
+    return (
+      <div className={`message user-message ${message.status === "queued" ? "queued" : ""}`}>
         <div className="message-body">{messageText(message)}</div>
-      )}
+        <span className="user-avatar">You</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="message assistant-message">
+      <div className="message-body markdown-content">
+        <MarkdownText>{messageText(message)}</MarkdownText>
+      </div>
     </div>
+  );
+}
+
+/** Collapses a finished run's steps into one line — the user reads the prose, not the steps. */
+function StepGroup({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <details className="step-group">
+      <summary>
+        <span className="chevron">
+          <Icon name="chevron-right" size={14} />
+        </span>
+        <span className="timeline-event-verb">{label}</span>
+      </summary>
+      <div className="step-group-steps">{children}</div>
+    </details>
   );
 }
 
@@ -592,27 +733,37 @@ function Composer({
 
   return (
     <form className="composer" onSubmit={submit}>
-      <textarea
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
-          }
-        }}
-        placeholder={working ? "Send guidance while the agent works…" : "Ask the agent to change the repository…"}
-        rows={2}
-      />
-      {onCancel && (
-        <button className="cancel-button" type="button" onClick={() => void onCancel()}>
-          Stop
-        </button>
-      )}
-      <button className="send-button" type="submit" disabled={!text.trim() || sending}>
-        ↑
-      </button>
-      <small>Enter to send · Shift + Enter for a new line</small>
+      <div className="composer-box">
+        <textarea
+          value={text}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              event.currentTarget.form?.requestSubmit();
+            }
+          }}
+          placeholder={working ? "Send guidance while the agent works…" : "Describe the change you want…"}
+          rows={2}
+        />
+        <div className="composer-actions">
+          {onCancel && (
+            <button className="cancel-button" type="button" onClick={() => void onCancel()}>
+              <Icon name="square" size={14} />
+              Stop
+            </button>
+          )}
+          <button
+            className="send-button"
+            type="submit"
+            aria-label="Send message"
+            disabled={!text.trim() || sending}
+          >
+            <Icon name="arrow-up" size={16} />
+          </button>
+        </div>
+      </div>
+      <small className="composer-hint">Enter to send · Shift + Enter for a new line</small>
     </form>
   );
 }
@@ -626,52 +777,56 @@ function TimelineEvent({
   reasoningCompleted: boolean;
   liveOutput?: string;
 }) {
-  let icon = "✓";
-  let title = event.type.replaceAll("_", " ");
+  // One line per action: a verb, a muted detail, an optional mono chip.
+  let icon: IconName = "check";
+  let verb = sentenceCase(event.type);
   let detail = "";
+  let code = "";
   let tone = "neutral";
 
   if (event.type === "run_started") {
-    icon = "●";
-    title = "Agent started working";
-    detail = String(event.payload.model ?? "");
+    icon = "play";
+    verb = "Started working";
     tone = "working";
   } else if (event.type === "run_completed") {
-    title = "Run completed";
-    detail = `${Number(event.payload.outputTokens ?? 0).toLocaleString()} output tokens`;
+    icon = "check";
+    verb = "Finished";
+    code = `${Number(event.payload.outputTokens ?? 0).toLocaleString()} tokens`;
     tone = "success";
   } else if (event.type === "run_failed") {
-    icon = "!";
-    title = "Run failed";
-    detail = String(event.payload.error ?? "The agent could not complete this run.");
+    icon = "alert-triangle";
+    verb = "Run failed";
+    detail = String(event.payload.error ?? "The agent could not complete this run");
     tone = "error";
   } else if (event.type === "reasoning_started") {
-    icon = reasoningCompleted ? "✓" : "●";
-    title = reasoningCompleted ? "Reasoning completed" : "Agent is reasoning";
+    icon = "sparkles";
+    verb = reasoningCompleted ? "Finished reasoning" : "Reasoning";
     tone = reasoningCompleted ? "neutral" : "working";
   } else if (event.type === "tool_started") {
-    icon = "›";
-    title = `${toolLabel(event.payload.toolName)} running`;
+    icon = "terminal";
+    verb = "Running";
+    code = toolLabel(event.payload.toolName);
     tone = "working";
   } else if (event.type === "file_changed") {
-    icon = "+";
-    title = "File updated";
-    detail = String(event.payload.path ?? "");
+    icon = "file-diff";
+    verb = "Edited";
+    code = String(event.payload.path ?? "");
   } else if (event.type === "checkpoint_saved") {
-    icon = "◆";
-    title = "Checkpoint saved";
+    icon = "layers";
+    verb = "Saved checkpoint";
     const changedFileCount = Number(
       event.payload.changedFileCount ??
       (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
     );
     detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
   } else if (event.type === "approval_requested") {
-    icon = "?";
-    title = "Waiting for approval";
+    icon = "alert-triangle";
+    verb = "Waiting for approval";
     detail = String(event.payload.reason ?? "");
     tone = "warning";
   } else if (event.type === "approval_resolved") {
-    title = event.payload.approved ? "Approval granted" : "Approval denied";
+    icon = event.payload.approved ? "check" : "x";
+    verb = event.payload.approved ? "Approval granted" : "Approval denied";
     tone = event.payload.approved ? "success" : "error";
   }
 
@@ -679,9 +834,14 @@ function TimelineEvent({
     return (
       <details className="tool-message live-tool-output" open>
         <summary>
-          <span className="tool-icon">›</span>
-          <span>{toolLabel(event.payload.toolName)}</span>
-          <small>Running live</small>
+          <span className="chevron">
+            <Icon name="chevron-right" size={14} />
+          </span>
+          <span className="tool-icon">
+            <Icon name="terminal" size={14} />
+          </span>
+          <span className="timeline-event-verb">Running</span>
+          <span className="timeline-event-code">{toolLabel(event.payload.toolName)}</span>
         </summary>
         <pre>{liveOutput}</pre>
       </details>
@@ -690,11 +850,12 @@ function TimelineEvent({
 
   return (
     <div className={`timeline-event ${tone}`}>
-      <span className="timeline-event-icon">{icon}</span>
-      <span className="timeline-event-copy">
-        <strong>{title}</strong>
-        {detail && <small>{detail}</small>}
+      <span className="timeline-event-icon">
+        <Icon name={icon} size={14} />
       </span>
+      <span className="timeline-event-verb">{verb}</span>
+      {detail && <span className="timeline-event-detail">{detail}</span>}
+      {code && <span className="timeline-event-code">{code}</span>}
     </div>
   );
 }
@@ -746,13 +907,19 @@ function CodeChangesCard({ changes, sessionId, commit }: { changes: CodeChanges;
   return (
     <section className="code-changes">
       <header className="changes-header">
-        <span className="changes-icon">±</span>
-        <span>
-          <strong>Code changes</strong>
-          <small>{changes.files.length} {changes.files.length === 1 ? "file" : "files"} changed</small>
+        <span className="changes-icon">
+          <Icon name="file-diff" size={16} />
         </span>
+        <strong>Code changes</strong>
+        <small>{changes.files.length} {changes.files.length === 1 ? "file" : "files"} changed</small>
         <span className="change-totals"><b>+{changes.additions}</b><i>−{changes.deletions}</i></span>
-        <a href={`/api/sessions/${sessionId}/changes.patch?commit=${encodeURIComponent(commit)}`} download>Download patch</a>
+        <a
+          className="download-patch"
+          href={`/api/sessions/${sessionId}/changes.patch?commit=${encodeURIComponent(commit)}`}
+          download
+        >
+          Download patch
+        </a>
       </header>
 
       <div className="changed-files">
@@ -761,13 +928,15 @@ function CodeChangesCard({ changes, sessionId, commit }: { changes: CodeChanges;
           return (
             <details className="changed-file" key={`${file.statusCode}-${file.path}`}>
               <summary>
+                <span className="chevron">
+                  <Icon name="chevron-right" size={14} />
+                </span>
                 <span className={`change-status ${file.status}`} title={statusLabel(file)}>{file.statusCode.charAt(0)}</span>
                 <span className="change-path">
                   <strong>{file.path}</strong>
                   {file.previousPath && <small>from {file.previousPath}</small>}
                 </span>
                 <span className="file-totals"><b>+{file.additions}</b><i>−{file.deletions}</i></span>
-                <span className="chevron">⌄</span>
               </summary>
               <div className="diff-view">
                 {file.binary ? (
@@ -794,11 +963,11 @@ function CodeChangesCard({ changes, sessionId, commit }: { changes: CodeChanges;
 
 function ApprovalCard({ approval, onResolve }: { approval: Approval; onResolve: (approved: boolean) => Promise<void> }) {
   return (
-    <div className="approval-card inline-approval">
+    <div className="approval-card">
       <p className="eyebrow">Approval needed</p>
       <strong>{approval.reason}</strong>
       {approval.command && <code>{approval.command}</code>}
-      <div>
+      <div className="approval-actions">
         <button onClick={() => void onResolve(false)}>Deny</button>
         <button className="approve" onClick={() => void onResolve(true)}>Allow once</button>
       </div>
@@ -842,18 +1011,28 @@ function Onboarding({ error, onCreated }: { error: string | null; onCreated: (se
   return (
     <main className="onboarding">
       <div className="onboarding-copy">
-        <span className="logo-large">C</span>
-        <p className="eyebrow">Cloud Agents V0</p>
-        <h1>Your coding agent.<br />Running in the cloud.</h1>
-        <p>Connect a public repository and start an ongoing coding session.</p>
+        <p className="eyebrow">Cloud Agents</p>
+        <h1>Connect a repository</h1>
+        <p>The agent works on a branch in your repository and reports back here.</p>
       </div>
       <form className="setup-card" onSubmit={submit}>
-        <h2>Connect a repository</h2>
-        <label>Project name<input name="name" placeholder="My application" required /></label>
-        <label>GitHub repository<input name="repositoryUrl" type="url" placeholder="https://github.com/owner/repository" required /></label>
+        <label>
+          <span>Project name</span>
+          <input name="name" placeholder="My application" required />
+        </label>
+        <label>
+          <span>GitHub repository</span>
+          <input name="repositoryUrl" type="url" placeholder="https://github.com/owner/repository" required />
+        </label>
         <div className="field-row">
-          <label>Base branch<input name="baseBranch" defaultValue="main" required /></label>
-          <label>OpenRouter model<input name="model" defaultValue="deepseek/deepseek-v4-flash-0731" required /></label>
+          <label>
+            <span>Base branch</span>
+            <input name="baseBranch" defaultValue="main" required />
+          </label>
+          <label>
+            <span>OpenRouter model</span>
+            <input name="model" defaultValue="deepseek/deepseek-v4-flash-0731" required />
+          </label>
         </div>
         <button type="submit" disabled={busy}>{busy ? "Preparing repository…" : "Connect repository"}</button>
         <small>V0 supports public GitHub repositories.</small>
