@@ -30,6 +30,8 @@ const server = app.listen(config.PORT, () => {
           environment: config.NODE_ENV,
           maxActiveRuns: config.MAX_ACTIVE_RUNS,
           defaultModel: config.OPENROUTER_MODEL,
+          inferenceProviders: config.OPENROUTER_PROVIDERS,
+          allowProviderFallbacks: config.OPENROUTER_ALLOW_FALLBACKS,
         },
         "Cloud Agents API started",
       );

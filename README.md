@@ -10,6 +10,8 @@ Pi Agent Core runs the agent loop.
 
 OpenRouter provides the language model.
 
+OpenRouter requests prefer Baseten as the upstream inference provider.
+
 Neon Postgres stores sessions, messages, runs, tools, events, approvals, and checkpoints.
 
 Docker isolates repository commands.
@@ -75,6 +77,37 @@ pnpm dev
 ```
 
 Open `http://localhost:5173`.
+
+## Model routing
+
+`OPENROUTER_MODEL` picks the model. OpenRouter then picks one of its upstream inference providers for that model.
+
+The provider table on an OpenRouter model page is informational. A provider is chosen only with the `provider` field on the request body, which the backend adds to every request.
+
+| Variable | Meaning |
+| --- | --- |
+| `OPENROUTER_PROVIDERS` | Comma-separated provider slugs, most preferred first. Defaults to `baseten`. Empty accepts OpenRouter's own routing. |
+| `OPENROUTER_ALLOW_FALLBACKS` | `true` treats that list as a preference order and permits other providers. `false` pins requests to it and fails when none can serve the model. Defaults to `true`, matching OpenRouter. |
+
+The default prefers Baseten, so every request carries:
+
+```json
+{
+  "model": "deepseek/deepseek-v4-flash-0731",
+  "provider": { "order": ["baseten"], "allow_fallbacks": true },
+  "messages": []
+}
+```
+
+Set `OPENROUTER_ALLOW_FALLBACKS=false` to force Baseten and refuse every other provider:
+
+```json
+"provider": { "only": ["baseten"], "allow_fallbacks": false }
+```
+
+A pinned provider that does not serve the selected model fails the request instead of silently routing elsewhere. Check the model's provider list on OpenRouter before pinning, and use the Request Builder under Provider Preferences to try a combination first.
+
+Each run logs the routing it used under `providerRouting`.
 
 ## Authentication
 

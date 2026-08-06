@@ -9,6 +9,8 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   OPENROUTER_MODEL: z.string().default("deepseek/deepseek-v4-flash-0731"),
+  OPENROUTER_PROVIDERS: z.string().default("baseten"),
+  OPENROUTER_ALLOW_FALLBACKS: z.enum(["true", "false"]).default("true"),
   PORT: z.coerce.number().int().positive().default(3000),
   APP_URL: z.string().url().default("http://localhost:5173"),
   WORKSPACE_ROOT: z.string().default(".cloud-agent"),
@@ -51,6 +53,10 @@ function normalisePrivateKey(value: string | undefined): string | undefined {
   return value?.includes("\\n") ? value.replaceAll("\\n", "\n") : value;
 }
 
+function providerSlugs(value: string): string[] {
+  return [...new Set(value.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
+}
+
 const appUrl = new URL(parsed.data.APP_URL);
 const isProduction = parsed.data.NODE_ENV === "production";
 
@@ -63,6 +69,8 @@ const developmentOrigins = ["http://localhost:5173", `http://localhost:${parsed.
 export const config = {
   ...parsed.data,
   APP_URL: appUrl.origin,
+  OPENROUTER_PROVIDERS: providerSlugs(parsed.data.OPENROUTER_PROVIDERS),
+  OPENROUTER_ALLOW_FALLBACKS: parsed.data.OPENROUTER_ALLOW_FALLBACKS === "true",
   GITHUB_APP_PRIVATE_KEY: normalisePrivateKey(parsed.data.GITHUB_APP_PRIVATE_KEY),
   WORKSPACE_ROOT: resolve(parsed.data.WORKSPACE_ROOT),
   LOG_LEVEL: parsed.data.LOG_LEVEL ?? (isProduction ? "info" : "debug"),

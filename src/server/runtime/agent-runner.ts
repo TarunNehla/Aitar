@@ -29,6 +29,7 @@ import { withRepositoryGitAccess } from "../github/repository-access.js";
 import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
+import { applyProviderRouting, configuredProviderPreferences } from "./openrouter-routing.js";
 import { workspaceManager } from "./workspace-manager.js";
 import { boundedTail, persistedToolSummary, safeToolArguments } from "./output-policy.js";
 
@@ -270,7 +271,14 @@ export class AgentWorker {
       repositoryId: relation.repository.id,
       model: run.model,
     });
-    runLog.info({ maxTurns: run.max_turns, maxCostUsd: run.max_cost_usd }, "Agent run started");
+    runLog.info(
+      {
+        maxTurns: run.max_turns,
+        maxCostUsd: run.max_cost_usd,
+        providerRouting: configuredProviderPreferences(),
+      },
+      "Agent run started",
+    );
 
     const writer = new EventWriter(run.session_id, run.id);
     let inputTokens = 0;
@@ -357,6 +365,7 @@ export class AgentWorker {
           messages: history,
         },
         streamFn: models.streamSimple.bind(models),
+        onPayload: applyProviderRouting,
         getApiKey: () => config.OPENROUTER_API_KEY,
         sessionId: run.session_id,
         toolExecution: "sequential",
