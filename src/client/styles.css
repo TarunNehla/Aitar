@@ -20,6 +20,35 @@ button:disabled { cursor: not-allowed; }
 }
 .muted { color: var(--text-muted); font: var(--type-caption); }
 
+.primary-button,
+.ghost-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  height: 36px;
+  padding: 0 var(--space-7);
+  border-radius: var(--radius-control);
+  font: var(--type-ui);
+  transition: var(--transition-control);
+}
+.primary-button {
+  color: var(--text-inverse);
+  background: var(--action-primary);
+  border: 1px solid var(--action-primary);
+}
+.primary-button:hover:not(:disabled) { background: var(--action-primary-hover); border-color: var(--action-primary-hover); }
+.primary-button:active:not(:disabled) { background: var(--action-primary-press); transform: scale(0.985); }
+.ghost-button {
+  color: var(--text-strong);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+}
+.ghost-button:hover:not(:disabled) { background: var(--gray-25); border-color: var(--border-strong); }
+.ghost-button:active:not(:disabled) { transform: scale(0.985); }
+.primary-button:disabled,
+.ghost-button:disabled { opacity: 0.45; }
+
 /* ── Shell ─────────────────────────────────────────────────────────────── */
 
 .app-shell {
@@ -122,6 +151,8 @@ button:disabled { cursor: not-allowed; }
   border-radius: var(--radius-pill);
 }
 
+.sidebar-actions { display: grid; gap: var(--space-4); }
+.sidebar-actions .primary-button { height: 34px; }
 .new-session {
   display: flex;
   align-items: center;
@@ -250,7 +281,9 @@ button:disabled { cursor: not-allowed; }
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.user-message.queued .message-body { opacity: 0.45; }
+.user-message.queued .message-body,
+.user-message.pending .message-body { opacity: 0.45; }
+.user-message.pending { animation: ds-rise-in var(--dur-base) var(--ease-entrance); }
 .user-avatar {
   display: grid;
   place-items: center;
@@ -679,6 +712,35 @@ button:disabled { cursor: not-allowed; }
   font: var(--type-body);
 }
 
+/* ── Session loading and failure ───────────────────────────────────────── */
+/* One centred line while the session is fetched — the thread never renders
+   half-built, so there is nothing for a skeleton to stand in for. */
+
+.conversation-state {
+  display: grid;
+  grid-row: 1 / -1;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-6);
+  padding: var(--space-12) var(--space-9);
+  text-align: center;
+}
+.conversation-state .empty-icon { margin: 0; }
+.conversation-state h2 {
+  color: var(--text-strong);
+  font: var(--type-subheading);
+  letter-spacing: var(--tracking-heading);
+}
+.conversation-state p {
+  max-width: 380px;
+  color: var(--text-muted);
+  font: var(--type-body);
+  font-size: var(--text-sm);
+  text-wrap: pretty;
+}
+
+.conversation-state .spinner-label { font: var(--type-body); }
+
 /* ── First run ─────────────────────────────────────────────────────────── */
 /* A single centred column on an otherwise empty page. Resist filling it. */
 
@@ -700,18 +762,16 @@ button:disabled { cursor: not-allowed; }
 }
 .onboarding-copy p { color: var(--text-muted); font: var(--type-body); }
 
-.setup-card {
-  display: grid;
-  gap: var(--space-7);
-  width: 100%;
+.setup-form { display: grid; gap: var(--space-7); width: 100%; }
+.setup-form.framed {
   max-width: var(--composer-max);
   padding: var(--space-9);
   background: var(--surface-panel);
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-panel);
 }
-.setup-card label { display: grid; gap: var(--space-3); color: var(--text-body); font: var(--type-ui); }
-.setup-card input {
+.setup-form label { display: grid; gap: var(--space-3); color: var(--text-body); font: var(--type-ui); }
+.setup-form input {
   width: 100%;
   height: 36px;
   padding: 0 var(--space-6);
@@ -724,23 +784,28 @@ button:disabled { cursor: not-allowed; }
   font-size: var(--text-sm);
   transition: var(--transition-control);
 }
-.setup-card input::placeholder { color: var(--text-faint); }
-.setup-card input:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
+.setup-form input::placeholder { color: var(--text-faint); }
+.setup-form input:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
+.setup-form input:disabled { color: var(--text-muted); background: var(--surface-sunken); }
 .field-row { display: grid; grid-template-columns: 1fr 1.7fr; gap: var(--space-6); }
-.setup-card > button {
-  height: 42px;
-  color: var(--text-inverse);
-  background: var(--action-primary);
-  border: 1px solid var(--action-primary);
-  border-radius: var(--radius-control);
+.setup-actions { display: flex; justify-content: flex-end; gap: var(--space-5); }
+.setup-form.framed .setup-actions { display: grid; }
+.setup-form.framed .setup-actions .primary-button { height: 42px; font-size: var(--text-md); }
+.setup-form > small { color: var(--text-faint); font: var(--type-caption); }
+
+.setup-progress { display: grid; gap: var(--space-5); margin: 0; padding: 0; list-style: none; }
+.setup-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--text-muted);
   font: var(--type-ui);
-  font-size: var(--text-md);
-  transition: var(--transition-control);
 }
-.setup-card > button:hover:not(:disabled) { background: var(--action-primary-hover); border-color: var(--action-primary-hover); }
-.setup-card > button:active:not(:disabled) { transform: scale(0.985); }
-.setup-card > button:disabled { opacity: 0.45; }
-.setup-card > small { color: var(--text-faint); font: var(--type-caption); }
+.setup-step.done { color: var(--text-body); }
+.setup-step.done svg { color: var(--state-running-fg); }
+.setup-step.active { color: var(--text-strong); }
+.setup-step.waiting { color: var(--text-faint); }
+
 .form-error {
   padding: var(--space-5) var(--space-6);
   color: var(--text-danger);
@@ -750,6 +815,71 @@ button:disabled { cursor: not-allowed; }
   font: var(--type-ui);
   font-size: var(--text-xs);
 }
+
+/* ── Dialog, spinner ───────────────────────────────────────────────────── */
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: var(--space-9);
+  background: var(--surface-overlay);
+  animation: ds-fade-in var(--dur-fast) var(--ease-out);
+}
+.dialog {
+  width: 520px;
+  max-width: 100%;
+  max-height: 100%;
+  overflow-y: auto;
+  background: var(--surface-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-modal);
+  box-shadow: var(--shadow-lg);
+  animation: ds-rise-in var(--dur-base) var(--ease-entrance);
+}
+.dialog-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-7);
+  padding: var(--space-8) var(--space-8) var(--space-6);
+}
+.dialog-heading { display: grid; gap: var(--space-3); flex: 1; min-width: 0; }
+.dialog-heading h2 {
+  color: var(--text-strong);
+  font: var(--type-heading);
+  letter-spacing: var(--tracking-heading);
+}
+.dialog-heading p { color: var(--text-muted); font: var(--type-body); font-size: var(--text-sm); text-wrap: pretty; }
+.dialog-close {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  transition: var(--transition-control);
+}
+.dialog-close:hover { color: var(--text-strong); background: var(--surface-hover); }
+.dialog-body { padding: 0 var(--space-8) var(--space-8); }
+
+.spinner-row { display: inline-flex; align-items: center; gap: var(--space-4); }
+.spinner {
+  flex: none;
+  border: 2px solid var(--gray-200);
+  border-top-color: var(--teal-500);
+  border-radius: var(--radius-pill);
+  animation: ds-spin 0.7s linear infinite;
+}
+.spinner-14 { width: 14px; height: 14px; }
+.spinner-16 { width: 16px; height: 16px; }
+.spinner-20 { width: 20px; height: 20px; }
+.spinner-label { color: var(--text-muted); font: var(--type-ui); font-size: var(--text-xs); }
 
 /* ── Responsive ────────────────────────────────────────────────────────── */
 
@@ -767,6 +897,10 @@ button:disabled { cursor: not-allowed; }
   .composer { margin: 0 var(--space-7) var(--space-7); }
   .onboarding { padding: var(--space-10) var(--space-7); }
   .field-row { grid-template-columns: 1fr; }
+  .dialog-overlay { padding: var(--space-7); }
+  .dialog-header { padding: var(--space-7) var(--space-7) var(--space-5); }
+  .dialog-body { padding: 0 var(--space-7) var(--space-7); }
+  .setup-actions { flex-direction: column-reverse; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -4,6 +4,8 @@ import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
 import { Icon, type IconName } from "./components/Icon";
+import { RepositorySetup } from "./components/RepositorySetup";
+import { Spinner } from "./components/Spinner";
 
 interface Repository {
   id: string;
@@ -60,8 +62,24 @@ interface SessionDetail extends SessionListItem {
   approvals: Approval[];
 }
 
+/** Rendered from client state only, so it never reaches the database. */
+interface PendingMessage {
+  id: string;
+  sessionId: string;
+  text: string;
+  messageId: string | null;
+}
+
 const activeStatuses = new Set(["pending", "running", "waiting_for_approval", "cancelling"]);
 const liveOutputLimit = 100_000;
+const agentStatuses = [
+  "Thinking…",
+  "Reading the request…",
+  "Inspecting the repository…",
+  "Planning the next step…",
+  "Noodling on it…",
+];
+const agentStatusInterval = 2_400;
 
 function messageText(message: MessageView): string {
   return message.blocks
@@ -223,6 +241,25 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
   });
 }
 
+/** Placeholder copy for the gap between sending and the first backend event. */
+function useRotatingStatus(active: boolean): string {
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    if (!active) {
+      setIndex(0);
+      return;
+    }
+    const timer = setInterval(
+      () => setIndex((current) => (current + 1) % agentStatuses.length),
+      agentStatusInterval,
+    );
+    return () => clearInterval(timer);
+  }, [active]);
+
+  return agentStatuses[index];
+}
+
 export function App() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
@@ -234,12 +271,17 @@ export function App() {
   const [liveToolOutput, setLiveToolOutput] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const [agentPlaceholder, setAgentPlaceholder] = useState<{ sessionId: string; afterSequence: number } | null>(null);
+  const [setupOpen, setSetupOpen] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const shouldFollowMessagesRef = useRef(true);
   const renderedSessionRef = useRef<string | null>(null);
   const requestedChangesRef = useRef(new Set<string>());
   const selectedSessionRef = useRef<string | null>(null);
   const eventReplayReadyRef = useRef(false);
+  const latestSequenceRef = useRef(0);
   selectedSessionRef.current = selectedId;
 
   const loadSessions = useCallback(async () => {
@@ -255,9 +297,19 @@ export function App() {
     return result.repositories;
   }, []);
 
-  const loadDetail = useCallback(async (sessionId: string) => {
-    const result = await api<SessionDetail>(`/api/sessions/${sessionId}`);
-    setDetail(result);
+  const loadDetail = useCallback(async (sessionId: string, background = false) => {
+    if (!background) setDetailError(null);
+    try {
+      const result = await api<SessionDetail>(`/api/sessions/${sessionId}`);
+      if (selectedSessionRef.current !== sessionId) return;
+      setDetail(result);
+      setDetailError(null);
+    } catch (reason) {
+      if (selectedSessionRef.current !== sessionId) return;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (background) setError(message);
+      else setDetailError(message);
+    }
   }, []);
 
   useEffect(() => {
@@ -267,22 +319,22 @@ export function App() {
   }, [loadRepositories, loadSessions]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      setChangesByCommit({});
-      requestedChangesRef.current.clear();
-      return;
-    }
-    setDetail((current) => current?.session.id === selectedId ? current : null);
+    setDetail(null);
+    setDetailError(null);
+    setPendingMessages([]);
+    setAgentPlaceholder(null);
     setChangesByCommit({});
     requestedChangesRef.current.clear();
+    if (!selectedId) return;
+
     setEvents([]);
     setStreamingText("");
     setLiveToolOutput({});
     eventReplayReadyRef.current = false;
+    latestSequenceRef.current = 0;
     shouldFollowMessagesRef.current = true;
     renderedSessionRef.current = null;
-    loadDetail(selectedId).catch((reason) => setError(reason.message));
+    void loadDetail(selectedId);
 
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
     source.addEventListener("ready", () => {
@@ -301,6 +353,7 @@ export function App() {
         }
         return;
       }
+      latestSequenceRef.current = Math.max(latestSequenceRef.current, event.sequence);
       setEvents((current) => {
         if (current.some((candidate) => candidate.id === event.id)) return current;
         return [...current, event].slice(-300);
@@ -330,7 +383,7 @@ export function App() {
             return next;
           });
         }
-        void loadDetail(selectedId);
+        void loadDetail(selectedId, true);
         void loadSessions();
       }
     };
@@ -339,6 +392,31 @@ export function App() {
     };
     return () => source.close();
   }, [selectedId, loadDetail, loadSessions]);
+
+  const messageIds = useMemo(
+    () => new Set((detail?.messages ?? []).map((message) => message.id)),
+    [detail?.messages],
+  );
+  const visiblePending = useMemo(
+    () => pendingMessages.filter(
+      (item) => item.sessionId === selectedId && !(item.messageId && messageIds.has(item.messageId)),
+    ),
+    [pendingMessages, selectedId, messageIds],
+  );
+
+  useEffect(() => {
+    setPendingMessages((current) => {
+      const next = current.filter((item) => !(item.messageId && messageIds.has(item.messageId)));
+      return next.length === current.length ? current : next;
+    });
+  }, [messageIds]);
+
+  const awaitingAgent = Boolean(
+    agentPlaceholder &&
+    agentPlaceholder.sessionId === selectedId &&
+    !events.some((event) => event.sequence > agentPlaceholder.afterSequence),
+  );
+  const agentStatus = useRotatingStatus(awaitingAgent);
 
   const timeline = useMemo(
     () => buildTimeline(detail?.messages ?? [], events),
@@ -385,7 +463,7 @@ export function App() {
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
-  }, [changesByCommit, detail, liveToolOutput, selectedId, streamingText]);
+  }, [agentStatus, changesByCommit, detail, liveToolOutput, selectedId, streamingText, visiblePending]);
 
   const sessionsByRepository = useMemo(() => {
     const groups = new Map<string, { repository: Repository; sessions: SessionListItem[] }>();
@@ -398,19 +476,28 @@ export function App() {
     return [...groups.values()];
   }, [repositories, sessions]);
 
+  const selectedItem = useMemo(
+    () => sessions.find((item) => item.session.id === selectedId),
+    [sessions, selectedId],
+  );
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
+
+  const openSession = useCallback(async (sessionId: string) => {
+    await Promise.all([loadRepositories(), loadSessions()]);
+    setSelectedId(sessionId);
+    setSetupOpen(false);
+  }, [loadRepositories, loadSessions]);
+
+  const sessionView = !selectedId
+    ? "empty"
+    : detailError
+      ? "error"
+      : detail?.session.id === selectedId ? "ready" : "loading";
+
   if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
 
   if (repositories.length === 0) {
-    return (
-      <Onboarding
-        error={error}
-        onCreated={async (sessionId) => {
-          await Promise.all([loadRepositories(), loadSessions()]);
-          setSelectedId(sessionId);
-        }}
-      />
-    );
+    return <RepositorySetup variant="page" error={error} onCreated={openSession} />;
   }
 
   return (
@@ -463,33 +550,73 @@ export function App() {
           ))}
         </div>
 
-        {detail && (
-          <button
-            className="new-session"
-            onClick={async () => {
-              const result = await api<{ session: { id: string } }>(
-                `/api/repositories/${detail.repository.id}/chats`,
-                {
-                  method: "POST",
-                  body: JSON.stringify({
-                    title: "New session",
-                    model: detail.session.defaultModel,
-                    baseBranch: detail.repository.defaultBranch,
-                  }),
-                },
-              );
-              await loadSessions();
-              setSelectedId(result.session.id);
-            }}
-          >
-            <Icon name="plus" size={16} />
-            New session
+        <div className="sidebar-actions">
+          {selectedItem && (
+            <button
+              className="new-session"
+              onClick={async () => {
+                const result = await api<{ session: { id: string } }>(
+                  `/api/repositories/${selectedItem.repository.id}/chats`,
+                  {
+                    method: "POST",
+                    body: JSON.stringify({
+                      title: "New session",
+                      model: selectedItem.session.defaultModel,
+                      baseBranch: selectedItem.repository.defaultBranch,
+                    }),
+                  },
+                );
+                await loadSessions();
+                setSelectedId(result.session.id);
+              }}
+            >
+              <Icon name="plus" size={16} />
+              New session
+            </button>
+          )}
+          <button className="primary-button" onClick={() => setSetupOpen(true)}>
+            <Icon name="folder-git-2" size={16} />
+            New repository
           </button>
-        )}
+        </div>
       </aside>
 
       <main className="conversation">
-        {detail ? (
+        {sessionView === "loading" && (
+          <div className="conversation-state">
+            <Spinner size={20} label="Loading session…" />
+          </div>
+        )}
+
+        {sessionView === "empty" && (
+          <div className="conversation-state">
+            <div className="empty-icon">
+              <Icon name="message-square" size={20} />
+            </div>
+            <h2>No session open</h2>
+            <p>Pick a session from the sidebar, or start a new one</p>
+          </div>
+        )}
+
+        {sessionView === "error" && (
+          <div className="conversation-state">
+            <div className="empty-icon">
+              <Icon name="alert-triangle" size={20} />
+            </div>
+            <h2>Session did not load</h2>
+            <p>{detailError}</p>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => selectedId && void loadDetail(selectedId)}
+            >
+              <Icon name="rotate-ccw" size={16} />
+              Retry
+            </button>
+          </div>
+        )}
+
+        {sessionView === "ready" && detail && (
           <>
             <header className="conversation-header">
               <div className="conversation-title">
@@ -530,7 +657,7 @@ export function App() {
               }}
             >
               <div className="thread">
-              {timeline.length === 0 && (
+              {timeline.length === 0 && visiblePending.length === 0 && (
                 <div className="empty-chat">
                   <div className="empty-icon">
                     <Icon name="sparkles" size={20} />
@@ -571,6 +698,22 @@ export function App() {
                 ),
               )}
 
+              {visiblePending.map((item) => (
+                <div className="message user-message pending" key={item.id}>
+                  <div className="message-body">{item.text}</div>
+                  <span className="user-avatar">You</span>
+                </div>
+              ))}
+
+              {awaitingAgent && (
+                <div className="timeline-event working">
+                  <span className="timeline-event-icon">
+                    <Icon name="sparkles" size={14} />
+                  </span>
+                  <span className="timeline-event-verb">{agentStatus}</span>
+                </div>
+              )}
+
               {detail.approvals.map((approval) => (
                 <ApprovalCard
                   key={approval.id}
@@ -580,7 +723,7 @@ export function App() {
                       method: "POST",
                       body: JSON.stringify({ approved }),
                     });
-                    await loadDetail(detail.session.id);
+                    await loadDetail(detail.session.id, true);
                   }}
                 />
               ))}
@@ -600,26 +743,47 @@ export function App() {
               working={Boolean(activeRun)}
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
               onSend={async (text) => {
+                const sessionId = detail.session.id;
+                const pendingId = crypto.randomUUID();
                 setError(null);
                 shouldFollowMessagesRef.current = true;
+                setPendingMessages((current) => [
+                  ...current,
+                  { id: pendingId, sessionId, text, messageId: null },
+                ]);
+                setAgentPlaceholder({ sessionId, afterSequence: latestSequenceRef.current });
+
                 try {
-                  await api(`/api/sessions/${detail.session.id}/messages`, {
-                    method: "POST",
-                    body: JSON.stringify({ text }),
-                  });
-                  await loadDetail(detail.session.id);
+                  const result = await api<{ message: { id: string } }>(
+                    `/api/sessions/${sessionId}/messages`,
+                    { method: "POST", body: JSON.stringify({ text }) },
+                  );
+                  setPendingMessages((current) =>
+                    current.map((item) => item.id === pendingId ? { ...item, messageId: result.message.id } : item),
+                  );
+                  await loadDetail(sessionId, true);
                 } catch (reason) {
+                  setPendingMessages((current) => current.filter((item) => item.id !== pendingId));
+                  setAgentPlaceholder((current) => current?.sessionId === sessionId ? null : current);
                   setError(reason instanceof Error ? reason.message : String(reason));
                   throw reason;
                 }
               }}
             />
-            {error && <div className="toast">{error}</div>}
           </>
-        ) : (
-          <div className="center-state">Select a session, or start a new one from the sidebar.</div>
         )}
+
+        {error && <div className="toast">{error}</div>}
       </main>
+
+      {setupOpen && (
+        <RepositorySetup
+          variant="dialog"
+          defaultModel={selectedItem?.session.defaultModel}
+          onCreated={openSession}
+          onClose={() => setSetupOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -718,13 +882,14 @@ function Composer({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!text.trim() || sending) return;
+    const draft = text.trim();
+    if (!draft || sending) return;
     setSending(true);
+    setText("");
     try {
-      await onSend(text.trim());
-      setText("");
+      await onSend(draft);
     } catch {
-      // The parent shows the request error and keeps the draft for retry.
+      setText(draft);
     } finally {
       setSending(false);
     }
@@ -971,72 +1136,5 @@ function ApprovalCard({ approval, onResolve }: { approval: Approval; onResolve: 
         <button className="approve" onClick={() => void onResolve(true)}>Allow once</button>
       </div>
     </div>
-  );
-}
-
-function Onboarding({ error, onCreated }: { error: string | null; onCreated: (sessionId: string) => Promise<void> }) {
-  const [busy, setBusy] = useState(false);
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setBusy(true);
-    setLocalError(null);
-    const data = new FormData(event.currentTarget);
-    try {
-      const repositoryResult = await api<{ repository: { id: string } }>("/api/repositories", {
-        method: "POST",
-        body: JSON.stringify({
-          name: data.get("name"),
-          repositoryUrl: data.get("repositoryUrl"),
-          defaultBranch: data.get("baseBranch"),
-        }),
-      });
-      const sessionResult = await api<{ session: { id: string } }>(
-        `/api/repositories/${repositoryResult.repository.id}/chats`,
-        {
-          method: "POST",
-          body: JSON.stringify({ title: "First session", model: data.get("model"), baseBranch: data.get("baseBranch") }),
-        },
-      );
-      await onCreated(sessionResult.session.id);
-    } catch (reason) {
-      setLocalError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <main className="onboarding">
-      <div className="onboarding-copy">
-        <p className="eyebrow">Cloud Agents</p>
-        <h1>Connect a repository</h1>
-        <p>The agent works on a branch in your repository and reports back here.</p>
-      </div>
-      <form className="setup-card" onSubmit={submit}>
-        <label>
-          <span>Project name</span>
-          <input name="name" placeholder="My application" required />
-        </label>
-        <label>
-          <span>GitHub repository</span>
-          <input name="repositoryUrl" type="url" placeholder="https://github.com/owner/repository" required />
-        </label>
-        <div className="field-row">
-          <label>
-            <span>Base branch</span>
-            <input name="baseBranch" defaultValue="main" required />
-          </label>
-          <label>
-            <span>OpenRouter model</span>
-            <input name="model" defaultValue="deepseek/deepseek-v4-flash-0731" required />
-          </label>
-        </div>
-        <button type="submit" disabled={busy}>{busy ? "Preparing repository…" : "Connect repository"}</button>
-        <small>V0 supports public GitHub repositories.</small>
-        {(localError ?? error) && <div className="form-error">{localError ?? error}</div>}
-      </form>
-    </main>
   );
 }
