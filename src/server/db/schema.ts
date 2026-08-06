@@ -1,6 +1,7 @@
 import {
   bigint,
   bigserial,
+  boolean,
   doublePrecision,
   index,
   integer,
@@ -12,20 +13,81 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import { accounts, authSchema, authSessions, users, verifications } from "./auth-schema.js";
+
+export { accounts, authSessions, users, verifications };
 
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 };
 
-export const repositories = pgTable("repositories", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: text("name").notNull(),
-  repositoryUrl: text("repository_url").notNull(),
-  defaultBranch: text("default_branch").notNull().default("main"),
-  lastFetchedAt: timestamp("last_fetched_at", { withTimezone: true }),
-  ...timestamps,
-});
+export const githubInstallations = pgTable(
+  "github_installations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    installationId: bigint("installation_id", { mode: "number" }).notNull(),
+    accountId: bigint("account_id", { mode: "number" }).notNull(),
+    accountLogin: text("account_login").notNull(),
+    accountType: text("account_type").notNull(),
+    repositorySelection: text("repository_selection").notNull().default("selected"),
+    status: text("status").notNull().default("active"),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("github_installations_installation_idx").on(table.installationId),
+    index("github_installations_account_idx").on(table.accountId),
+  ],
+);
+
+export const githubInstallationUsers = pgTable(
+  "github_installation_users",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    installationId: uuid("installation_id")
+      .notNull()
+      .references(() => githubInstallations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("github_installation_users_unique_idx").on(table.installationId, table.userId),
+    index("github_installation_users_user_idx").on(table.userId),
+  ],
+);
+
+export const repositories = pgTable(
+  "repositories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    repositoryUrl: text("repository_url").notNull(),
+    defaultBranch: text("default_branch").notNull().default("main"),
+    githubRepositoryId: bigint("github_repository_id", { mode: "number" }),
+    githubInstallationId: uuid("github_installation_id").references(() => githubInstallations.id, {
+      onDelete: "set null",
+    }),
+    githubFullName: text("github_full_name"),
+    githubOwnerLogin: text("github_owner_login"),
+    githubPrivate: boolean("github_private").notNull().default(false),
+    githubCloneUrl: text("github_clone_url"),
+    githubAccess: text("github_access").notNull().default("granted"),
+    lastFetchedAt: timestamp("last_fetched_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    index("repositories_owner_idx").on(table.ownerUserId),
+    index("repositories_installation_idx").on(table.githubInstallationId),
+    uniqueIndex("repositories_owner_github_repository_idx")
+      .on(table.ownerUserId, table.githubRepositoryId)
+      .where(sql`${table.githubRepositoryId} IS NOT NULL`),
+  ],
+);
 
 export const chatSessions = pgTable(
   "chat_sessions",
@@ -205,6 +267,9 @@ export const approvalRequests = pgTable(
 );
 
 export const schema = {
+  ...authSchema,
+  githubInstallations,
+  githubInstallationUsers,
   repositories,
   chatSessions,
   runs,

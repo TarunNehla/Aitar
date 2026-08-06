@@ -1,3 +1,5 @@
+import { authClient } from "./auth-client";
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...options,
@@ -6,6 +8,11 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
       ...options?.headers,
     },
   });
+
+  if (response.status === 401) {
+    void authClient.getSession({ query: { disableCookieCache: true } });
+    throw new Error("Your session ended. Sign in to continue");
+  }
 
   const text = await response.text();
   let body: (T & { error?: string }) | null = null;

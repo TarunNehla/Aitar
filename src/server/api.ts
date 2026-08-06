@@ -1,24 +1,45 @@
 import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import express from "express";
+import { toNodeHandler } from "better-auth/node";
 import { z } from "zod";
-import { errorForLog, httpLogger } from "./logger.js";
+import { auth } from "./auth/auth.js";
+import { authenticatedUser, requireAuthentication } from "./auth/session.js";
+import { config, githubAppConfigured, githubWebhookConfigured } from "./config.js";
+import { errorForLog, httpLogger, logger } from "./logger.js";
+import {
+  GitHubAppNotConfiguredError,
+  GitHubInstallationUnavailableError,
+  githubApp,
+  installationPageUrl,
+} from "./github/app.js";
+import { createInstallationState, verifyInstallationState } from "./github/installation-state.js";
+import { withRepositoryGitAccess } from "./github/repository-access.js";
+import { handleWebhookEvent, verifyWebhookSignature } from "./github/webhook.js";
+import {
+  getGithubInstallationForUser,
+  linkUserToGithubInstallation,
+  listGithubInstallationsForUser,
+  upsertGithubInstallation,
+} from "./db/github-store.js";
 import {
   createRepository,
   createQueuedUserMessage,
   createSession,
   createUserMessageAndRun,
   deleteQueuedMessage,
+  findRepositoryByGithubId,
   finishRun,
   getActiveBranchMessages,
   getActiveRunForSession,
+  getApprovalForUser,
   getCheckpointForSession,
   getLatestCheckpointForSession,
   getPendingApprovals,
-  getRun,
-  getSession,
+  getRepositoryForUser,
+  getRunForUser,
+  getSessionForUser,
   listEvents,
-  getRepository,
   listRepositories,
   listSessionRuns,
   listSessions,
@@ -26,16 +47,28 @@ import {
   resolveApproval,
   updateRepositoryFetched,
   updateSessionEnvironment,
+  type Access,
+  type RepositoryRow,
+  type SessionRelation,
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
 import { activeRuns } from "./runtime/agent-runner.js";
 import { approvalBroker } from "./runtime/approval-broker.js";
 import { chatBranchName, validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
 
-const repositoryInput = z.object({
+const apiLogger = logger.child({ component: "api" });
+
+const publicRepositoryInput = z.object({
   name: z.string().trim().min(1).max(100),
   repositoryUrl: z.string().url(),
   defaultBranch: z.string().trim().min(1).max(200).default("main"),
+});
+
+const githubRepositoryInput = z.object({
+  installationId: z.coerce.number().int().positive(),
+  githubRepositoryId: z.coerce.number().int().positive(),
+  name: z.string().trim().min(1).max(100).optional(),
+  defaultBranch: z.string().trim().min(1).max(200).optional(),
 });
 
 const sessionInput = z.object({
@@ -50,6 +83,8 @@ const messageInput = z.object({
   parentMessageId: z.string().uuid().nullable().optional(),
 });
 
+const installationIdInput = z.coerce.number().int().positive();
+
 function asyncRoute(handler: (request: Request, response: Response) => Promise<void>) {
   return (request: Request, response: Response, next: NextFunction) => {
     handler(request, response).catch(next);
@@ -62,27 +97,243 @@ function routeParam(request: Request, name: string): string {
   return value;
 }
 
+function resolveAccess<T>(access: Access<T>, response: Response, missing: string): T | null {
+  if (access.status === "ok") return access.value;
+  if (access.status === "forbidden") {
+    response.status(403).json({ error: "You do not have access to this resource" });
+    return null;
+  }
+  response.status(404).json({ error: missing });
+  return null;
+}
+
+async function requireRepository(request: Request, response: Response): Promise<RepositoryRow | null> {
+  const access = await getRepositoryForUser(routeParam(request, "repositoryId"), authenticatedUser(request).id);
+  return resolveAccess(access, response, "Repository not found");
+}
+
+async function requireSession(request: Request, response: Response): Promise<SessionRelation | null> {
+  const access = await getSessionForUser(routeParam(request, "sessionId"), authenticatedUser(request).id);
+  return resolveAccess(access, response, "Session not found");
+}
+
+function appRedirect(searchParameters: Record<string, string>): string {
+  const destination = new URL("/", config.APP_URL);
+  for (const [key, value] of Object.entries(searchParameters)) destination.searchParams.set(key, value);
+  return destination.toString();
+}
+
+async function chatCheckout(relation: SessionRelation, userId: string) {
+  return withRepositoryGitAccess({ repository: relation.repository, userId }, (gitEnvironment) =>
+    workspaceManager.ensureChatCheckout({
+      chatId: relation.session.id,
+      repositoryId: relation.repository.id,
+      repositoryUrl: relation.repository.repositoryUrl,
+      baseBranch: relation.session.baseBranch,
+      branchName: relation.session.branchName,
+      headCommit: relation.session.headCommit as string,
+      legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
+        ? relation.session.settings.legacy_workspace_id
+        : undefined,
+      gitEnvironment,
+    }),
+  );
+}
+
+async function checkpointRange(relation: SessionRelation, request: Request, response: Response) {
+  const sessionId = relation.session.id;
+  const requestedCommit = typeof request.query.commit === "string"
+    ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
+    : undefined;
+  const checkpoint = requestedCommit
+    ? await getCheckpointForSession(sessionId, requestedCommit)
+    : await getLatestCheckpointForSession(sessionId);
+  if (requestedCommit && !checkpoint) {
+    response.status(404).json({ error: "Checkpoint not found" });
+    return null;
+  }
+  return { requestedCommit, checkpoint };
+}
+
 export function createApi() {
   const app = express();
   app.disable("x-powered-by");
   app.use(httpLogger);
-  app.use(express.json({ limit: "1mb" }));
 
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
   });
 
+  app.all("/api/auth/*splat", toNodeHandler(auth));
+
+  app.post(
+    "/api/github/webhook",
+    express.raw({ type: "*/*", limit: "1mb" }),
+    asyncRoute(async (request, response) => {
+      if (!githubWebhookConfigured) {
+        response.status(503).json({ error: "GitHub webhooks are not configured" });
+        return;
+      }
+
+      const signature = request.header("x-hub-signature-256") ?? undefined;
+      const body = Buffer.isBuffer(request.body) ? request.body.toString("utf8") : "";
+      if (!body || !(await verifyWebhookSignature({ body, signature }))) {
+        apiLogger.warn({ hasSignature: Boolean(signature) }, "Rejected a GitHub webhook with an invalid signature");
+        response.status(401).json({ error: "Invalid webhook signature" });
+        return;
+      }
+
+      const event = request.header("x-github-event") ?? "";
+      let payload: unknown;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        response.status(400).json({ error: "Invalid webhook payload" });
+        return;
+      }
+
+      const outcome = await handleWebhookEvent({ event, payload });
+      response.json({ outcome });
+    }),
+  );
+
+  app.get(
+    "/api/github/installations/callback",
+    asyncRoute(async (request, response) => {
+      const state = typeof request.query.state === "string" ? request.query.state : "";
+      const verified = verifyInstallationState(state);
+      if (!verified) {
+        apiLogger.warn("Rejected a GitHub installation callback with an invalid state");
+        response.redirect(appRedirect({ github_error: "invalid_state" }));
+        return;
+      }
+
+      if (request.query.setup_action === "request") {
+        response.redirect(appRedirect({ github_error: "approval_required" }));
+        return;
+      }
+
+      const installationId = Number(request.query.installation_id);
+      if (!Number.isFinite(installationId) || installationId <= 0) {
+        response.redirect(appRedirect({ github_error: "missing_installation" }));
+        return;
+      }
+
+      try {
+        const metadata = await githubApp.getInstallation(installationId);
+        const installation = await upsertGithubInstallation({
+          installationId: metadata.installationId,
+          accountId: metadata.accountId,
+          accountLogin: metadata.accountLogin,
+          accountType: metadata.accountType,
+          repositorySelection: metadata.repositorySelection,
+          status: metadata.suspended ? "suspended" : "active",
+        });
+        await linkUserToGithubInstallation({ installationId: installation.id, userId: verified.userId });
+        response.redirect(appRedirect({ github_installation: String(metadata.installationId) }));
+      } catch (error) {
+        apiLogger.error({ error: errorForLog(error) }, "GitHub installation callback failed");
+        response.redirect(appRedirect({ github_error: "installation_unavailable" }));
+      }
+    }),
+  );
+
+  app.use(express.json({ limit: "1mb" }));
+  app.use("/api", requireAuthentication);
+
   app.get(
     "/api/repositories",
-    asyncRoute(async (_request, response) => {
-      response.json({ repositories: await listRepositories() });
+    asyncRoute(async (request, response) => {
+      response.json({ repositories: await listRepositories(authenticatedUser(request).id) });
     }),
   );
 
   app.post(
     "/api/repositories",
     asyncRoute(async (request, response) => {
-      const input = repositoryInput.parse(request.body);
+      const user = authenticatedUser(request);
+      const body = request.body as Record<string, unknown>;
+
+      if (body?.githubRepositoryId !== undefined) {
+        const input = githubRepositoryInput.parse(body);
+        const installation = await getGithubInstallationForUser({
+          installationId: input.installationId,
+          userId: user.id,
+        });
+        if (!installation) {
+          response.status(403).json({ error: "You do not have access to this GitHub App installation" });
+          return;
+        }
+        if (installation.status !== "active") {
+          response.status(409).json({ error: "That GitHub App installation is not active" });
+          return;
+        }
+
+        const existing = await findRepositoryByGithubId({
+          ownerUserId: user.id,
+          githubRepositoryId: input.githubRepositoryId,
+        });
+        if (existing) {
+          response.status(200).json({ repository: existing });
+          return;
+        }
+
+        const available = await githubApp.listInstallationRepositories(installation.installationId);
+        const selected = available.find((entry) => entry.githubRepositoryId === input.githubRepositoryId);
+        if (!selected) {
+          response.status(404).json({ error: "That repository is not available to this installation" });
+          return;
+        }
+
+        validateRepositoryUrl(selected.cloneUrl);
+        const repositoryId = randomUUID();
+        const baseBranch = input.defaultBranch ?? selected.defaultBranch;
+        const draft: RepositoryRow = {
+          id: repositoryId,
+          ownerUserId: user.id,
+          name: input.name ?? selected.name,
+          repositoryUrl: selected.cloneUrl,
+          defaultBranch: baseBranch,
+          githubRepositoryId: selected.githubRepositoryId,
+          githubInstallationId: installation.id,
+          githubFullName: selected.fullName,
+          githubOwnerLogin: selected.ownerLogin,
+          githubPrivate: selected.private,
+          githubCloneUrl: selected.cloneUrl,
+          githubAccess: "granted",
+          lastFetchedAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        await withRepositoryGitAccess({ repository: draft, userId: user.id }, (gitEnvironment) =>
+          workspaceManager.prepareRepository({
+            repositoryId,
+            repositoryUrl: selected.cloneUrl,
+            baseBranch,
+            gitEnvironment,
+          }),
+        );
+
+        const repository = await createRepository({
+          id: repositoryId,
+          ownerUserId: user.id,
+          name: draft.name,
+          repositoryUrl: selected.cloneUrl,
+          defaultBranch: baseBranch,
+          githubRepositoryId: selected.githubRepositoryId,
+          githubInstallationId: installation.id,
+          githubFullName: selected.fullName,
+          githubOwnerLogin: selected.ownerLogin,
+          githubPrivate: selected.private,
+          githubCloneUrl: selected.cloneUrl,
+        });
+        await updateRepositoryFetched(repository.id);
+        response.status(201).json({ repository });
+        return;
+      }
+
+      const input = publicRepositoryInput.parse(body);
       validateRepositoryUrl(input.repositoryUrl);
       const repositoryId = randomUUID();
       await workspaceManager.prepareRepository({
@@ -90,7 +341,7 @@ export function createApi() {
         repositoryUrl: input.repositoryUrl,
         baseBranch: input.defaultBranch,
       });
-      const repository = await createRepository({ id: repositoryId, ...input });
+      const repository = await createRepository({ id: repositoryId, ownerUserId: user.id, ...input });
       await updateRepositoryFetched(repository.id);
       response.status(201).json({ repository });
     }),
@@ -100,12 +351,10 @@ export function createApi() {
     "/api/repositories/:repositoryId/chats",
     asyncRoute(async (request, response) => {
       const input = sessionInput.parse(request.body);
-      const repository = await getRepository(routeParam(request, "repositoryId"));
-      if (!repository) {
-        response.status(404).json({ error: "Repository not found" });
-        return;
-      }
+      const repository = await requireRepository(request, response);
+      if (!repository) return;
 
+      const user = authenticatedUser(request);
       const sessionId = randomUUID();
       const baseBranch = input.baseBranch ?? repository.defaultBranch;
       const branchName = chatBranchName(sessionId);
@@ -119,13 +368,16 @@ export function createApi() {
       });
 
       try {
-        const prepared = await workspaceManager.prepareChat({
-          chatId: sessionId,
-          repositoryId: repository.id,
-          repositoryUrl: repository.repositoryUrl,
-          baseBranch,
-          branchName,
-        });
+        const prepared = await withRepositoryGitAccess({ repository, userId: user.id }, (gitEnvironment) =>
+          workspaceManager.prepareChat({
+            chatId: sessionId,
+            repositoryId: repository.id,
+            repositoryUrl: repository.repositoryUrl,
+            baseBranch,
+            branchName,
+            gitEnvironment,
+          }),
+        );
         const ready = await updateSessionEnvironment({
           sessionId,
           envStatus: "ready",
@@ -145,20 +397,17 @@ export function createApi() {
     "/api/sessions",
     asyncRoute(async (request, response) => {
       const repositoryId = typeof request.query.repositoryId === "string" ? request.query.repositoryId : undefined;
-      response.json({ sessions: await listSessions(repositoryId) });
+      response.json({ sessions: await listSessions(authenticatedUser(request).id, repositoryId) });
     }),
   );
 
   app.get(
     "/api/sessions/:sessionId",
     asyncRoute(async (request, response) => {
-      const sessionId = routeParam(request, "sessionId");
-      const relation = await getSession(sessionId);
-      if (!relation) {
-        response.status(404).json({ error: "Session not found" });
-        return;
-      }
+      const relation = await requireSession(request, response);
+      if (!relation) return;
 
+      const sessionId = relation.session.id;
       const [sessionMessages, sessionRuns, approvals] = await Promise.all([
         getActiveBranchMessages(sessionId),
         listSessionRuns(sessionId),
@@ -171,48 +420,22 @@ export function createApi() {
   app.get(
     "/api/sessions/:sessionId/changes",
     asyncRoute(async (request, response) => {
-      const sessionId = routeParam(request, "sessionId");
-      const relation = await getSession(sessionId);
-      if (!relation) {
-        response.status(404).json({ error: "Session not found" });
-        return;
-      }
+      const relation = await requireSession(request, response);
+      if (!relation) return;
       if (!relation.session.baseCommit || !relation.session.headCommit) {
         response.status(409).json({ error: "Chat environment is not ready" });
         return;
       }
 
-      const location = await workspaceManager.ensureChatCheckout({
-        chatId: relation.session.id,
-        repositoryId: relation.repository.id,
-        repositoryUrl: relation.repository.repositoryUrl,
-        baseBranch: relation.session.baseBranch,
-        branchName: relation.session.branchName,
-        headCommit: relation.session.headCommit,
-        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
-          ? relation.session.settings.legacy_workspace_id
-          : undefined,
-      });
+      const location = await chatCheckout(relation, authenticatedUser(request).id);
+      const range = await checkpointRange(relation, request, response);
+      if (!range) return;
 
-      const requestedCommit = typeof request.query.commit === "string"
-        ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
-        : undefined;
-      const checkpoint = requestedCommit
-        ? await getCheckpointForSession(sessionId, requestedCommit)
-        : await getLatestCheckpointForSession(sessionId);
-      if (requestedCommit && !checkpoint) {
-        response.status(404).json({ error: "Checkpoint not found" });
-        return;
-      }
-      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.session.headCommit;
-      const baseCommit = requestedCommit && checkpoint
-        ? await workspaceManager.parentCommit(location.repository, checkpoint.checkpointCommit)
-        : checkpoint?.baseCommit ?? relation.session.baseCommit;
-      const changes = await workspaceManager.codeChanges(
-        location.repository,
-        baseCommit,
-        checkpointCommit,
-      );
+      const checkpointCommit = range.checkpoint?.checkpointCommit ?? relation.session.headCommit;
+      const baseCommit = range.requestedCommit && range.checkpoint
+        ? await workspaceManager.parentCommit(location.repository, range.checkpoint.checkpointCommit)
+        : range.checkpoint?.baseCommit ?? relation.session.baseCommit;
+      const changes = await workspaceManager.codeChanges(location.repository, baseCommit, checkpointCommit);
       response.json({ changes });
     }),
   );
@@ -220,48 +443,22 @@ export function createApi() {
   app.get(
     "/api/sessions/:sessionId/changes.patch",
     asyncRoute(async (request, response) => {
-      const sessionId = routeParam(request, "sessionId");
-      const relation = await getSession(sessionId);
-      if (!relation) {
-        response.status(404).json({ error: "Session not found" });
-        return;
-      }
+      const relation = await requireSession(request, response);
+      if (!relation) return;
       if (!relation.session.baseCommit || !relation.session.headCommit) {
         response.status(409).json({ error: "Chat environment is not ready" });
         return;
       }
 
-      const location = await workspaceManager.ensureChatCheckout({
-        chatId: relation.session.id,
-        repositoryId: relation.repository.id,
-        repositoryUrl: relation.repository.repositoryUrl,
-        baseBranch: relation.session.baseBranch,
-        branchName: relation.session.branchName,
-        headCommit: relation.session.headCommit,
-        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
-          ? relation.session.settings.legacy_workspace_id
-          : undefined,
-      });
+      const location = await chatCheckout(relation, authenticatedUser(request).id);
+      const range = await checkpointRange(relation, request, response);
+      if (!range) return;
 
-      const requestedCommit = typeof request.query.commit === "string"
-        ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
-        : undefined;
-      const checkpoint = requestedCommit
-        ? await getCheckpointForSession(sessionId, requestedCommit)
-        : await getLatestCheckpointForSession(sessionId);
-      if (requestedCommit && !checkpoint) {
-        response.status(404).json({ error: "Checkpoint not found" });
-        return;
-      }
-      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.session.headCommit;
-      const baseCommit = requestedCommit && checkpoint
-        ? await workspaceManager.parentCommit(location.repository, checkpoint.checkpointCommit)
-        : checkpoint?.baseCommit ?? relation.session.baseCommit;
-      const patch = await workspaceManager.patch(
-        location.repository,
-        baseCommit,
-        checkpointCommit,
-      );
+      const checkpointCommit = range.checkpoint?.checkpointCommit ?? relation.session.headCommit;
+      const baseCommit = range.requestedCommit && range.checkpoint
+        ? await workspaceManager.parentCommit(location.repository, range.checkpoint.checkpointCommit)
+        : range.checkpoint?.baseCommit ?? relation.session.baseCommit;
+      const patch = await workspaceManager.patch(location.repository, baseCommit, checkpointCommit);
       response.setHeader("Content-Disposition", 'attachment; filename="changes.patch"');
       response.type("text/x-diff").send(patch);
     }),
@@ -271,7 +468,10 @@ export function createApi() {
     "/api/sessions/:sessionId/messages",
     asyncRoute(async (request, response) => {
       const input = messageInput.parse(request.body);
-      const sessionId = routeParam(request, "sessionId");
+      const relation = await requireSession(request, response);
+      if (!relation) return;
+
+      const sessionId = relation.session.id;
       const active = await getActiveRunForSession(sessionId);
 
       if (active) {
@@ -297,6 +497,9 @@ export function createApi() {
   app.get(
     "/api/sessions/:sessionId/events",
     asyncRoute(async (request, response) => {
+      const relation = await requireSession(request, response);
+      if (!relation) return;
+
       const afterHeader = Number(request.headers["last-event-id"] ?? 0);
       const afterQuery = Number(request.query.after ?? 0);
       let lastSequence = Number.isFinite(afterQuery) ? Math.max(afterHeader, afterQuery) : afterHeader;
@@ -319,7 +522,7 @@ export function createApi() {
         response.write(`data: ${JSON.stringify(event)}\n\n`);
       };
 
-      const sessionId = routeParam(request, "sessionId");
+      const sessionId = relation.session.id;
       const unsubscribe = eventHub.subscribe(sessionId, (event) => {
         if (replaying) pending.push(event);
         else send(event);
@@ -343,11 +546,9 @@ export function createApi() {
   app.post(
     "/api/runs/:runId/cancel",
     asyncRoute(async (request, response) => {
-      const run = await getRun(routeParam(request, "runId"));
-      if (!run) {
-        response.status(404).json({ error: "Run not found" });
-        return;
-      }
+      const access = await getRunForUser(routeParam(request, "runId"), authenticatedUser(request).id);
+      const run = resolveAccess(access, response, "Run not found");
+      if (!run) return;
 
       await markRunCancelling(run.id);
       const cancelledLive = activeRuns.cancel(run.id);
@@ -360,7 +561,11 @@ export function createApi() {
     "/api/approvals/:approvalId",
     asyncRoute(async (request, response) => {
       const input = z.object({ approved: z.boolean() }).parse(request.body);
-      const approval = await resolveApproval(routeParam(request, "approvalId"), input.approved);
+      const access = await getApprovalForUser(routeParam(request, "approvalId"), authenticatedUser(request).id);
+      const owned = resolveAccess(access, response, "Pending approval not found");
+      if (!owned) return;
+
+      const approval = await resolveApproval(owned.id, input.approved);
       if (!approval) {
         response.status(404).json({ error: "Pending approval not found" });
         return;
@@ -370,14 +575,79 @@ export function createApi() {
     }),
   );
 
+  app.get(
+    "/api/github/status",
+    asyncRoute(async (_request, response) => {
+      response.json({ appConfigured: githubAppConfigured, webhooksConfigured: githubWebhookConfigured });
+    }),
+  );
+
+  app.post(
+    "/api/github/installations/start",
+    asyncRoute(async (request, response) => {
+      const state = createInstallationState(authenticatedUser(request).id);
+      response.json({ url: installationPageUrl(state) });
+    }),
+  );
+
+  app.get(
+    "/api/github/installations",
+    asyncRoute(async (request, response) => {
+      const installations = await listGithubInstallationsForUser(authenticatedUser(request).id);
+      response.json({
+        installations: installations.map((installation) => ({
+          installationId: installation.installationId,
+          accountLogin: installation.accountLogin,
+          accountType: installation.accountType,
+          repositorySelection: installation.repositorySelection,
+          status: installation.status,
+        })),
+      });
+    }),
+  );
+
+  app.get(
+    "/api/github/installations/:installationId/repositories",
+    asyncRoute(async (request, response) => {
+      const installationId = installationIdInput.parse(routeParam(request, "installationId"));
+      const installation = await getGithubInstallationForUser({
+        installationId,
+        userId: authenticatedUser(request).id,
+      });
+      if (!installation) {
+        response.status(403).json({ error: "You do not have access to this GitHub App installation" });
+        return;
+      }
+      if (installation.status !== "active") {
+        response.status(409).json({ error: "That GitHub App installation is not active", status: installation.status });
+        return;
+      }
+
+      const repositories = await githubApp.listInstallationRepositories(installationId);
+      response.json({ repositories });
+    }),
+  );
+
   app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
-    const message = error instanceof Error ? error.message : "Unexpected error";
-    const status = error instanceof z.ZodError ? 400 : message.includes("active run") ? 409 : 500;
     if (error instanceof z.ZodError) {
       request.log.warn({ issueCount: error.issues.length }, "Request validation failed");
-    } else {
-      request.log.error({ error: errorForLog(error) }, "API request failed");
+      response.status(400).json({ error: "The request could not be validated" });
+      return;
     }
+
+    request.log.error({ error: errorForLog(error) }, "API request failed");
+
+    if (error instanceof GitHubAppNotConfiguredError) {
+      response.status(503).json({ error: error.message });
+      return;
+    }
+    if (error instanceof GitHubInstallationUnavailableError) {
+      response.status(409).json({ error: error.message });
+      return;
+    }
+
+    const message = error instanceof Error ? error.message : "Unexpected error";
+    const status = message.includes("active run") ? 409 : 500;
     response.status(status).json({ error: message });
   });
 

@@ -3,6 +3,74 @@ import pino, { type LoggerOptions } from "pino";
 import { pinoHttp } from "pino-http";
 import { config } from "./config.js";
 
+const REDACTED = "[Redacted]";
+
+const secretKeys = [
+  "apiKey",
+  "authorization",
+  "cookie",
+  "clientSecret",
+  "accessToken",
+  "access_token",
+  "refreshToken",
+  "refresh_token",
+  "idToken",
+  "id_token",
+  "sessionToken",
+  "token",
+  "privateKey",
+  "webhookSecret",
+  "password",
+  "secret",
+  "databaseUrl",
+  "DATABASE_URL",
+  "OPENROUTER_API_KEY",
+  "BETTER_AUTH_SECRET",
+  "GOOGLE_CLIENT_SECRET",
+  "GITHUB_CLIENT_SECRET",
+  "GITHUB_APP_PRIVATE_KEY",
+  "GITHUB_WEBHOOK_SECRET",
+];
+
+const redactPaths = [
+  "req.headers.authorization",
+  "req.headers.cookie",
+  "req.headers['x-hub-signature-256']",
+  "res.headers['set-cookie']",
+  "body",
+  "request.body",
+  "payload",
+  "args.content",
+  "arguments.content",
+  ...secretKeys,
+  ...secretKeys.map((key) => `*.${key}`),
+  ...secretKeys.map((key) => `*.*.${key}`),
+];
+
+const secretPatterns: Array<[RegExp, string]> = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[Redacted]"],
+  [/\/\/[^/\s:@]+:[^/\s@]+@/g, "//[Redacted]@"],
+  [/x-access-token:[^@\s/]+/gi, "x-access-token:[Redacted]"],
+  [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "gh_[Redacted]"],
+  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "github_pat_[Redacted]"],
+  [/(?<![\w-])(authorization|bearer|token)\s*[=:]\s*[^\s"',@]+/gi, "$1=[Redacted]"],
+];
+
+export function redactSecrets(value: string): string {
+  return secretPatterns.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), value);
+}
+
+function scrubValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return redactSecrets(value);
+  if (depth >= 6 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((entry) => scrubValue(entry, depth + 1));
+  const scrubbed: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    scrubbed[key] = scrubValue(entry, depth + 1);
+  }
+  return scrubbed;
+}
+
 export function createLoggerOptions(input: { enabled?: boolean; pretty?: boolean } = {}): LoggerOptions {
   const options: LoggerOptions = {
     name: "cloud-agents",
@@ -11,23 +79,22 @@ export function createLoggerOptions(input: { enabled?: boolean; pretty?: boolean
     serializers: {
       err: pino.stdSerializers.err,
     },
+    formatters: {
+      log(object) {
+        return scrubValue(object) as Record<string, unknown>;
+      },
+    },
+    hooks: {
+      logMethod(args, method) {
+        const scrubbed = args.map((argument) =>
+          typeof argument === "string" ? redactSecrets(argument) : argument,
+        ) as typeof args;
+        return method.apply(this, scrubbed);
+      },
+    },
     redact: {
-      paths: [
-        "req.headers.authorization",
-        "req.headers.cookie",
-        "res.headers['set-cookie']",
-        "authorization",
-        "cookie",
-        "apiKey",
-        "databaseUrl",
-        "DATABASE_URL",
-        "OPENROUTER_API_KEY",
-        "body",
-        "request.body",
-        "args.content",
-        "arguments.content",
-      ],
-      censor: "[Redacted]",
+      paths: redactPaths,
+      censor: REDACTED,
     },
   };
 
@@ -68,7 +135,7 @@ export const httpLogger = pinoHttp({
       return {
         id: request.id,
         method: request.method,
-        url: request.url,
+        url: redactSecrets(String(request.url)),
         remoteAddress: request.remoteAddress,
       };
     },

@@ -2,6 +2,8 @@ node_modules/
 .pnpm-store/
 dist/
 .env
+*.pem
+*.key
 .DS_Store
 .cloud-agent/
 coverage/

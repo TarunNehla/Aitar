@@ -20,6 +20,7 @@ export async function runProcess(
     timeoutMs?: number;
     signal?: AbortSignal;
     input?: string;
+    env?: NodeJS.ProcessEnv;
     onStdout?: (chunk: string) => void;
     onStderr?: (chunk: string) => void;
     captureTail?: boolean;
@@ -31,7 +32,7 @@ export async function runProcess(
     processLogger.debug({ executable: command, timeoutMs }, "Process started");
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: process.env,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
       stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
 

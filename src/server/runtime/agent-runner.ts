@@ -25,6 +25,7 @@ import {
   updateSessionHead,
 } from "../db/store.js";
 import type { MessageView } from "../../shared/contracts.js";
+import { withRepositoryGitAccess } from "../github/repository-access.js";
 import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
@@ -311,17 +312,20 @@ export class AgentWorker {
       if (!relation.session.baseCommit || !relation.session.headCommit) throw new Error("Chat environment is not ready");
 
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "starting" });
-      const location = await workspaceManager.ensureChatCheckout({
-        chatId: relation.session.id,
-        repositoryId: relation.repository.id,
-        repositoryUrl: relation.repository.repositoryUrl,
-        baseBranch: relation.session.baseBranch,
-        branchName: relation.session.branchName,
-        headCommit: relation.session.headCommit,
-        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
-          ? relation.session.settings.legacy_workspace_id
-          : undefined,
-      });
+      const location = await withRepositoryGitAccess({ repository: relation.repository }, (gitEnvironment) =>
+        workspaceManager.ensureChatCheckout({
+          chatId: relation.session.id,
+          repositoryId: relation.repository.id,
+          repositoryUrl: relation.repository.repositoryUrl,
+          baseBranch: relation.session.baseBranch,
+          branchName: relation.session.branchName,
+          headCommit: relation.session.headCommit as string,
+          legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
+            ? relation.session.settings.legacy_workspace_id
+            : undefined,
+          gitEnvironment,
+        }),
+      );
       repositoryPath = location.repository;
       await workspaceManager.ensureSandbox(relation.session.id, repositoryPath);
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });

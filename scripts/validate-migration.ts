@@ -1,8 +1,31 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { closeDatabase, sql } from "../src/server/db/client.js";
 
 const schemaName = `migration_test_${Date.now()}`;
 const rollbackMarker = "migration-validation-complete";
+
+const requiredTables = [
+  "users",
+  "accounts",
+  "auth_sessions",
+  "verifications",
+  "github_installations",
+  "github_installation_users",
+  "repositories",
+  "chat_sessions",
+  "messages",
+  "runs",
+  "events",
+  "chat_checkpoints",
+  "approval_requests",
+  "artifacts",
+];
+
+async function migrationFiles(): Promise<string[]> {
+  const entries = await readdir("drizzle");
+  return entries.filter((entry) => entry.endsWith(".sql")).sort();
+}
 
 async function statements(path: string): Promise<string[]> {
   const source = await readFile(path, "utf8");
@@ -13,84 +36,85 @@ async function statements(path: string): Promise<string[]> {
     .filter(Boolean);
 }
 
+function write(line: string) {
+  process.stdout.write(`${line}\n`);
+}
+
 try {
+  const files = await migrationFiles();
+
   await sql.begin(async (transaction) => {
     await transaction.unsafe(`CREATE SCHEMA "${schemaName}"`);
     await transaction.unsafe(`SET LOCAL search_path TO "${schemaName}"`);
-    for (const path of ["drizzle/0000_parallel_stature.sql", "drizzle/0001_whole_mephistopheles.sql"]) {
-      for (const statement of await statements(path)) await transaction.unsafe(statement);
+
+    for (const file of files) {
+      const source = await readFile(join("drizzle", file), "utf8");
+      if (/^\s*(DROP|TRUNCATE|DELETE)\b/im.test(source)) {
+        throw new Error(`${file} contains a destructive statement`);
+      }
+      for (const statement of await statements(join("drizzle", file))) {
+        await transaction.unsafe(statement);
+      }
     }
 
+    const tables = await transaction.unsafe<Array<{ table_name: string }>>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema = '${schemaName}'`,
+    );
+    const tableNames = tables.map((row) => row.table_name);
+    for (const required of requiredTables) {
+      if (!tableNames.includes(required)) throw new Error(`${required} table was not created`);
+    }
+    if (tableNames.includes("sessions")) throw new Error("Better Auth sessions table shadowed chat_sessions");
+
+    const [ownerColumn] = await transaction.unsafe<Array<{ is_nullable: string }>>(`
+      SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema = '${schemaName}' AND table_name = 'repositories' AND column_name = 'owner_user_id'
+    `);
+    if (!ownerColumn) throw new Error("repositories.owner_user_id is missing");
+    if (ownerColumn.is_nullable !== "NO") throw new Error("repositories.owner_user_id must be required");
+
+    const tokenColumns = await transaction.unsafe<Array<{ table_name: string; column_name: string }>>(`
+      SELECT table_name, column_name FROM information_schema.columns
+      WHERE table_schema = '${schemaName}'
+        AND table_name IN ('github_installations', 'github_installation_users', 'repositories')
+        AND (column_name ILIKE '%token%' OR column_name ILIKE '%secret%' OR column_name ILIKE '%private_key%')
+    `);
+    if (tokenColumns.length > 0) throw new Error("GitHub tables must not store token material");
+
     await transaction.unsafe(`
-      INSERT INTO projects (id, name, repository_url)
-      VALUES ('00000000-0000-0000-0000-000000000001', 'Example', 'https://github.com/example/repository');
-      INSERT INTO workspaces (id, project_id, name, base_branch, base_commit, local_path, status)
+      INSERT INTO users (id, name, email) VALUES ('user-1', 'Owner', 'owner@example.com');
+      INSERT INTO repositories (id, owner_user_id, name, repository_url)
+      VALUES (
+        '00000000-0000-0000-0000-000000000001', 'user-1', 'Example',
+        'https://github.com/example/repository'
+      );
+      INSERT INTO chat_sessions (id, repository_id, branch_name, default_model)
       VALUES (
         '00000000-0000-0000-0000-000000000002',
         '00000000-0000-0000-0000-000000000001',
-        'Main', 'main', repeat('a', 40), '/legacy/repository', 'ready'
-      );
-      INSERT INTO chat_sessions (id, workspace_id, title, default_model)
-      VALUES (
-        '00000000-0000-0000-0000-000000000003',
-        '00000000-0000-0000-0000-000000000002',
-        'Chat', 'example/model'
-      );
-      INSERT INTO messages (id, session_id, role)
-      VALUES (
-        '00000000-0000-0000-0000-000000000004',
-        '00000000-0000-0000-0000-000000000003',
-        'user'
-      );
-      INSERT INTO runs (id, session_id, workspace_id, user_message_id, model, max_cost_usd, max_turns)
-      VALUES (
-        '00000000-0000-0000-0000-000000000005',
-        '00000000-0000-0000-0000-000000000003',
-        '00000000-0000-0000-0000-000000000002',
-        '00000000-0000-0000-0000-000000000004',
-        'example/model', 1, 10
-      );
-      INSERT INTO workspace_checkpoints (workspace_id, run_id, base_commit, checkpoint_commit, internal_ref)
-      VALUES (
-        '00000000-0000-0000-0000-000000000002',
-        '00000000-0000-0000-0000-000000000005',
-        repeat('a', 40), repeat('b', 40), 'refs/heads/legacy'
-      );
-      INSERT INTO artifacts (workspace_id, session_id, name, type, storage_path)
-      VALUES (
-        '00000000-0000-0000-0000-000000000002',
-        '00000000-0000-0000-0000-000000000003',
-        'result', 'file', '/legacy/result'
+        'agent/00000000-0000-0000-0000-000000000002',
+        'example/model'
       );
     `);
 
-    for (const statement of await statements("drizzle/0002_huge_human_torch.sql")) {
-      await transaction.unsafe(statement);
-    }
+    const [orphan] = await transaction.unsafe<Array<{ blocked: boolean }>>(`
+      SELECT NOT EXISTS (
+        SELECT 1 FROM repositories WHERE owner_user_id IS NULL
+      ) AS blocked
+    `);
+    if (!orphan?.blocked) throw new Error("repositories may exist without an owner");
 
-    const [session] = await transaction.unsafe<Array<{
-      repository_id: string;
-      branch_name: string;
-      head_commit: string;
-    }>>(`SELECT repository_id, branch_name, head_commit FROM chat_sessions`);
-    const [checkpoint] = await transaction.unsafe<Array<{ session_id: string }>>(
-      `SELECT session_id FROM chat_checkpoints`,
+    await transaction.unsafe(`DELETE FROM users WHERE id = 'user-1'`);
+    const [remaining] = await transaction.unsafe<Array<{ count: string }>>(
+      `SELECT count(*)::text AS count FROM chat_sessions`,
     );
-    const [workspace] = await transaction.unsafe<Array<{ exists: boolean }>>(
-      `SELECT to_regclass('${schemaName}.workspaces') IS NOT NULL AS exists`,
-    );
-
-    if (session?.repository_id !== "00000000-0000-0000-0000-000000000001") throw new Error("repository relation was not preserved");
-    if (session.branch_name !== "agent/00000000-0000-0000-0000-000000000003") throw new Error("chat branch was not created");
-    if (session.head_commit !== "b".repeat(40)) throw new Error("latest checkpoint was not preserved");
-    if (checkpoint?.session_id !== "00000000-0000-0000-0000-000000000003") throw new Error("checkpoint relation was not preserved");
-    if (workspace?.exists) throw new Error("workspace table still exists");
+    if (remaining?.count !== "0") throw new Error("deleting a user must cascade to their chats");
 
     throw new Error(rollbackMarker);
   });
 } catch (error) {
   if (!(error instanceof Error) || error.message !== rollbackMarker) throw error;
-  process.stdout.write("Migration validation passed.\n");
+  write("Migration validation passed.");
 } finally {
   await closeDatabase();
 }

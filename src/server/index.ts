@@ -7,6 +7,7 @@ import { closeDatabase } from "./db/client.js";
 import { agentWorker } from "./runtime/agent-runner.js";
 import { config } from "./config.js";
 import { errorForLog, logger } from "./logger.js";
+import { ensureAskpassHelper } from "./runtime/git-credentials.js";
 import { environmentReaper } from "./runtime/environment-reaper.js";
 
 const app = createApi();
@@ -19,8 +20,8 @@ if (config.NODE_ENV === "production" && existsSync(clientDirectory)) {
 }
 
 const server = app.listen(config.PORT, () => {
-  void agentWorker
-    .start()
+  void ensureAskpassHelper()
+    .then(() => agentWorker.start())
     .then(() => {
       environmentReaper.start();
       logger.info(

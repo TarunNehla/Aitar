@@ -22,7 +22,7 @@ export function RepositorySetup({
   onCreated,
   onClose,
 }: {
-  variant: "page" | "dialog";
+  variant: "page" | "dialog" | "embedded";
   defaultModel?: string;
   error?: string | null;
   onCreated: (sessionId: string) => Promise<void>;
@@ -168,9 +168,11 @@ export function RepositorySetup({
         </button>
       </div>
 
-      {variant === "page" && <small>Cloud Agents supports public GitHub repositories</small>}
+      {variant !== "dialog" && <small>Use this for public GitHub repositories that need no installation</small>}
     </form>
   );
+
+  if (variant === "embedded") return form;
 
   if (variant === "dialog") {
     return (

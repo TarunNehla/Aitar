@@ -3,6 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import type { CodeChanges, FileChangeStatus } from "../../shared/contracts.js";
 import { config } from "../config.js";
 import { errorForLog, logger } from "../logger.js";
+import { baseGitEnvironment } from "./git-credentials.js";
 import { runChecked, runProcess, type ProcessResult } from "./process.js";
 
 const workspaceLogger = logger.child({ component: "workspace-manager" });
@@ -61,7 +62,7 @@ export function chatInternalRef(chatId: string): string {
 export function validateRepositoryUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.hostname !== "github.com") {
-    throw new Error("V0 supports public HTTPS GitHub repositories only");
+    throw new Error("Cloud Agents supports HTTPS GitHub repositories only");
   }
   if (url.username || url.password) throw new Error("Repository URLs must not contain credentials");
   if (url.pathname.split("/").filter(Boolean).length !== 2) {
@@ -100,16 +101,23 @@ function containerName(chatId: string): string {
 }
 
 async function hostGit(args: string[], options: Parameters<typeof runChecked>[2] = {}) {
-  return runChecked("git", [...HOST_GIT_PREFIX, ...args], options);
+  return runChecked("git", [...HOST_GIT_PREFIX, ...args], {
+    ...options,
+    env: { ...baseGitEnvironment(), ...options.env },
+  });
+}
+
+export interface RemoteGitAccess {
+  gitEnvironment?: NodeJS.ProcessEnv;
 }
 
 export class WorkspaceManager {
-  async prepareRepository(input: { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
+  async prepareRepository(input: RemoteGitAccess & { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
     const baseCommit = await this.ensureMirror(input);
     return { mirrorPath: repositoryMirrorPath(input.repositoryId), baseCommit };
   }
 
-  async prepareChat(input: {
+  async prepareChat(input: RemoteGitAccess & {
     chatId: string;
     repositoryId: string;
     repositoryUrl: string;
@@ -138,7 +146,7 @@ export class WorkspaceManager {
     return { ...location, baseCommit, headCommit: baseCommit };
   }
 
-  async ensureChatCheckout(input: {
+  async ensureChatCheckout(input: RemoteGitAccess & {
     chatId: string;
     repositoryId: string;
     repositoryUrl: string;
@@ -440,7 +448,7 @@ export class WorkspaceManager {
     return relative(repositoryPath, absolutePath);
   }
 
-  private async ensureMirror(input: { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
+  private async ensureMirror(input: RemoteGitAccess & { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
     const url = validateRepositoryUrl(input.repositoryUrl);
     const baseBranch = validateBranchName(input.baseBranch);
     const mirrorPath = repositoryMirrorPath(input.repositoryId);
@@ -454,7 +462,7 @@ export class WorkspaceManager {
     await hostGit(["remote", "set-url", "origin", url.toString()], { cwd: mirrorPath });
     await hostGit(
       ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
-      { cwd: mirrorPath, timeoutMs: 120_000 },
+      { cwd: mirrorPath, timeoutMs: 120_000, env: input.gitEnvironment },
     );
     return (await hostGit(["rev-parse", `refs/remotes/origin/${baseBranch}^{commit}`], { cwd: mirrorPath })).stdout.trim();
   }

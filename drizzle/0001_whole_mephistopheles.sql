@@ -1,3 +1,0 @@
-ALTER TABLE "runs" ADD COLUMN "workspace_id" uuid NOT NULL;--> statement-breakpoint
-ALTER TABLE "runs" ADD CONSTRAINT "runs_workspace_id_workspaces_id_fk" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "runs_one_active_workspace_idx" ON "runs" USING btree ("workspace_id") WHERE "runs"."status" IN ('pending', 'running', 'waiting_for_approval', 'cancelling');

@@ -17,17 +17,66 @@ import {
   toolExecutions,
 } from "./schema.js";
 
-export async function createRepository(input: { id: string; name: string; repositoryUrl: string; defaultBranch: string }) {
+export type Access<T> =
+  | { status: "ok"; value: T }
+  | { status: "not_found" }
+  | { status: "forbidden" };
+
+export type RepositoryRow = typeof repositories.$inferSelect;
+export type SessionRelation = { session: typeof chatSessions.$inferSelect; repository: RepositoryRow };
+
+function accessFor<T>(row: T | undefined, ownerUserId: string | undefined, userId: string): Access<T> {
+  if (!row) return { status: "not_found" };
+  if (ownerUserId !== userId) return { status: "forbidden" };
+  return { status: "ok", value: row };
+}
+
+export async function createRepository(input: {
+  id: string;
+  ownerUserId: string;
+  name: string;
+  repositoryUrl: string;
+  defaultBranch: string;
+  githubRepositoryId?: number;
+  githubInstallationId?: string;
+  githubFullName?: string;
+  githubOwnerLogin?: string;
+  githubPrivate?: boolean;
+  githubCloneUrl?: string;
+}) {
   const [repository] = await db.insert(repositories).values(input).returning();
   return repository;
 }
 
-export async function listRepositories() {
-  return db.select().from(repositories).orderBy(desc(repositories.updatedAt));
+export async function listRepositories(ownerUserId: string) {
+  return db
+    .select()
+    .from(repositories)
+    .where(eq(repositories.ownerUserId, ownerUserId))
+    .orderBy(desc(repositories.updatedAt));
 }
 
 export async function getRepository(repositoryId: string) {
   const [repository] = await db.select().from(repositories).where(eq(repositories.id, repositoryId)).limit(1);
+  return repository;
+}
+
+export async function getRepositoryForUser(repositoryId: string, userId: string): Promise<Access<RepositoryRow>> {
+  const repository = await getRepository(repositoryId);
+  return accessFor(repository, repository?.ownerUserId, userId);
+}
+
+export async function findRepositoryByGithubId(input: { ownerUserId: string; githubRepositoryId: number }) {
+  const [repository] = await db
+    .select()
+    .from(repositories)
+    .where(
+      and(
+        eq(repositories.ownerUserId, input.ownerUserId),
+        eq(repositories.githubRepositoryId, input.githubRepositoryId),
+      ),
+    )
+    .limit(1);
   return repository;
 }
 
@@ -114,14 +163,14 @@ export async function claimIdleSessionForEviction(idleBefore: Date) {
   return session;
 }
 
-export async function listSessions(repositoryId?: string) {
-  const query = db
+export async function listSessions(ownerUserId: string, repositoryId?: string) {
+  const ownedByUser = eq(repositories.ownerUserId, ownerUserId);
+  return db
     .select({ session: chatSessions, repository: repositories })
     .from(chatSessions)
-    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id));
-  return repositoryId
-    ? query.where(eq(chatSessions.repositoryId, repositoryId)).orderBy(desc(chatSessions.updatedAt))
-    : query.orderBy(desc(chatSessions.updatedAt));
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
+    .where(repositoryId ? and(ownedByUser, eq(chatSessions.repositoryId, repositoryId)) : ownedByUser)
+    .orderBy(desc(chatSessions.updatedAt));
 }
 
 export async function getSession(sessionId: string) {
@@ -132,6 +181,50 @@ export async function getSession(sessionId: string) {
     .where(eq(chatSessions.id, sessionId))
     .limit(1);
   return result;
+}
+
+export async function getSessionForUser(sessionId: string, userId: string): Promise<Access<SessionRelation>> {
+  const relation = await getSession(sessionId);
+  return accessFor(relation, relation?.repository.ownerUserId, userId);
+}
+
+export async function getRunForUser(runId: string, userId: string): Promise<Access<typeof runs.$inferSelect>> {
+  const [row] = await db
+    .select({ run: runs, repository: repositories })
+    .from(runs)
+    .innerJoin(chatSessions, eq(runs.sessionId, chatSessions.id))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
+    .where(eq(runs.id, runId))
+    .limit(1);
+  return accessFor(row?.run, row?.repository.ownerUserId, userId);
+}
+
+export async function getApprovalForUser(
+  approvalId: string,
+  userId: string,
+): Promise<Access<typeof approvalRequests.$inferSelect>> {
+  const [row] = await db
+    .select({ approval: approvalRequests, repository: repositories })
+    .from(approvalRequests)
+    .innerJoin(chatSessions, eq(approvalRequests.sessionId, chatSessions.id))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
+    .where(eq(approvalRequests.id, approvalId))
+    .limit(1);
+  return accessFor(row?.approval, row?.repository.ownerUserId, userId);
+}
+
+export async function getArtifactForUser(
+  artifactId: string,
+  userId: string,
+): Promise<Access<typeof artifacts.$inferSelect>> {
+  const [row] = await db
+    .select({ artifact: artifacts, repository: repositories })
+    .from(artifacts)
+    .innerJoin(chatSessions, eq(artifacts.sessionId, chatSessions.id))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
+    .where(eq(artifacts.id, artifactId))
+    .limit(1);
+  return accessFor(row?.artifact, row?.repository.ownerUserId, userId);
 }
 
 export async function createUserMessageAndRun(input: {
@@ -711,13 +804,15 @@ export async function saveArtifact(input: {
   return artifact;
 }
 
-export async function listArtifacts(sessionId: string) {
-  return db.select().from(artifacts).where(eq(artifacts.sessionId, sessionId)).orderBy(desc(artifacts.createdAt));
-}
-
-export async function getArtifact(artifactId: string) {
-  const [artifact] = await db.select().from(artifacts).where(eq(artifacts.id, artifactId)).limit(1);
-  return artifact;
+export async function listArtifactsForUser(sessionId: string, userId: string) {
+  return db
+    .select({ artifact: artifacts })
+    .from(artifacts)
+    .innerJoin(chatSessions, eq(artifacts.sessionId, chatSessions.id))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
+    .where(and(eq(artifacts.sessionId, sessionId), eq(repositories.ownerUserId, userId)))
+    .orderBy(desc(artifacts.createdAt))
+    .then((rows) => rows.map((row) => row.artifact));
 }
 
 export function newWorkerId(): string {

@@ -3,9 +3,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
+import { clearAuthQueryParameters, readAuthQueryParameters, useSession } from "./auth-client";
 import { Icon, type IconName } from "./components/Icon";
-import { RepositorySetup } from "./components/RepositorySetup";
+import { RepositoryConnect } from "./components/RepositoryConnect";
+import { SignIn } from "./components/SignIn";
 import { Spinner } from "./components/Spinner";
+import { UserMenu, type SessionUser } from "./components/UserMenu";
 
 interface Repository {
   id: string;
@@ -315,6 +318,35 @@ function useRotatingStatus(active: boolean): string {
 }
 
 export function App() {
+  const { data: session, isPending } = useSession();
+  const [authQuery] = useState(() => readAuthQueryParameters(window.location.search));
+
+  useEffect(() => {
+    clearAuthQueryParameters();
+  }, []);
+
+  if (isPending) return <div className="center-state">Opening Cloud Agents…</div>;
+  if (!session?.user) return <SignIn error={authQuery.oauthError} />;
+
+  return (
+    <Console
+      key={session.user.id}
+      user={session.user}
+      installationError={authQuery.installationError}
+      installationConnected={Boolean(authQuery.installationId)}
+    />
+  );
+}
+
+function Console({
+  user,
+  installationError,
+  installationConnected,
+}: {
+  user: SessionUser;
+  installationError: string | null;
+  installationConnected: boolean;
+}) {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -548,10 +580,21 @@ export function App() {
       ? "error"
       : detail?.session.id === selectedId ? "ready" : "loading";
 
+  const installationNotice = installationConnected
+    ? "GitHub installation connected. Pick a repository to start"
+    : null;
+
   if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
 
   if (repositories.length === 0) {
-    return <RepositorySetup variant="page" error={error} onCreated={openSession} />;
+    return (
+      <RepositoryConnect
+        variant="page"
+        error={installationError ?? error}
+        installationNotice={installationNotice}
+        onCreated={openSession}
+      />
+    );
   }
 
   return (
@@ -632,6 +675,7 @@ export function App() {
             <Icon name="folder-git-2" size={16} />
             New repository
           </button>
+          <UserMenu user={user} onSignedOut={clearAuthQueryParameters} />
         </div>
       </aside>
 
@@ -831,9 +875,11 @@ export function App() {
       </main>
 
       {setupOpen && (
-        <RepositorySetup
+        <RepositoryConnect
           variant="dialog"
           defaultModel={selectedItem?.session.defaultModel}
+          error={installationError}
+          installationNotice={installationNotice}
           onCreated={openSession}
           onClose={() => setSetupOpen(false)}
         />
