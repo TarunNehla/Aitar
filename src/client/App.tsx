@@ -49,7 +49,7 @@ type TimelineItem =
 
 type EventItem = Extract<TimelineItem, { kind: "event" }>;
 
-/** A finished run collapses behind one summary line; everything else renders in place. */
+/** Each finished stretch of activity collapses behind a summary line. */
 type ThreadNode =
   | { kind: "item"; item: TimelineItem }
   | { kind: "group"; id: string; label: string; items: EventItem[] };
@@ -95,10 +95,7 @@ const runLifecycleTypes = new Set(["run_started", "run_completed"]);
 // A checkpoint labels its diff card and a failure needs reading, so neither collapses.
 const uncollapsibleTypes = new Set(["checkpoint_saved", "run_failed"]);
 
-/**
- * Groups the steps of a finished run behind a single "Worked for 4m 13s" line.
- * While a run is still going its steps stay expanded so there is something to watch.
- */
+/** Groups finished activity while keeping messages in their original timeline positions. */
 function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNode[] {
   const runs = new Map<string, { startedAt?: string; endedAt?: string; finished: boolean }>();
   for (const event of events) {
@@ -116,14 +113,13 @@ function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNo
   let pending: EventItem[] = [];
   let pendingRunId: string | null = null;
 
-  function flush() {
+  function flush(boundaryAt?: string) {
     if (pending.length === 0) {
       pendingRunId = null;
       return;
     }
-    const run = pendingRunId ? runs.get(pendingRunId) : undefined;
-    const startedAt = run?.startedAt ?? pending[0].createdAt;
-    const endedAt = run?.endedAt ?? pending[pending.length - 1].createdAt;
+    const startedAt = pending[0].createdAt;
+    const endedAt = boundaryAt ?? pending[pending.length - 1].createdAt;
     nodes.push({
       kind: "group",
       id: `group-${pending[0].id}`,
@@ -136,20 +132,23 @@ function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNo
 
   for (const item of timeline) {
     if (item.kind === "message") {
-      flush();
+      flush(item.createdAt);
       nodes.push({ kind: "item", item });
       continue;
     }
 
     const finished = item.event.runId ? runs.get(item.event.runId)?.finished ?? false : false;
     if (!finished || uncollapsibleTypes.has(item.event.type)) {
-      flush();
+      flush(item.createdAt);
       nodes.push({ kind: "item", item });
       continue;
     }
-    if (runLifecycleTypes.has(item.event.type)) continue;
+    if (runLifecycleTypes.has(item.event.type)) {
+      if (item.event.type === "run_completed") flush(item.createdAt);
+      continue;
+    }
 
-    if (pendingRunId && pendingRunId !== item.event.runId) flush();
+    if (pendingRunId && pendingRunId !== item.event.runId) flush(item.createdAt);
     pendingRunId = item.event.runId;
     pending.push(item);
   }
