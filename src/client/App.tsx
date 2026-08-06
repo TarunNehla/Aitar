@@ -93,6 +93,60 @@ function toolLabel(value: unknown): string {
   return String(value ?? "Tool").replaceAll("_", " ");
 }
 
+function formatBytes(value: unknown): string | null {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes < 0) return null;
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)} KB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
+}
+
+function toolPresentation(block: MessageView["blocks"][number] | undefined, failed: boolean) {
+  const data = block?.data ?? {};
+  const toolName = String(data.toolName ?? "tool");
+  const status = failed ? "Failed" : "Completed";
+
+  if (toolName === "read_file") {
+    const metadata = [
+      Number.isFinite(Number(data.lines)) ? `${Number(data.lines).toLocaleString()} lines` : null,
+      formatBytes(data.bytes),
+    ].filter(Boolean).join(" · ");
+    return { verb: "Read", code: String(data.path ?? "file"), detail: metadata || status };
+  }
+  if (toolName === "search_files") {
+    const matches = Number(data.matches);
+    return {
+      verb: "Searched",
+      code: String(data.query ?? "files"),
+      detail: Number.isFinite(matches) ? `${matches.toLocaleString()} matches` : status,
+    };
+  }
+  if (toolName === "list_files") {
+    const count = Number(data.count);
+    return {
+      verb: "Listed files",
+      code: "",
+      detail: Number.isFinite(count) ? `${count.toLocaleString()} files` : status,
+    };
+  }
+  if (toolName === "run_command") {
+    const durationMs = Number(data.durationMs);
+    const commandDetails = [
+      data.exitCode === undefined ? null : `exit ${String(data.exitCode)}`,
+      Number.isFinite(durationMs) ? `${(durationMs / 1_000).toFixed(1)}s` : null,
+    ].filter(Boolean).join(" · ");
+    return {
+      verb: failed ? "Command failed" : "Ran",
+      code: String(data.command ?? "command"),
+      detail: commandDetails || status,
+    };
+  }
+  if (toolName === "write_file") {
+    return { verb: "Wrote", code: String(data.path ?? "file"), detail: status };
+  }
+  return { verb: toolLabel(toolName), code: "", detail: status };
+}
+
 function sentenceCase(value: string): string {
   const text = value.replaceAll("_", " ");
   return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
@@ -801,6 +855,30 @@ function Message({ message }: { message: MessageView }) {
       );
     }
     const failed = Boolean(block?.data.isError);
+    const presentation = toolPresentation(block, failed);
+    const toolName = String(block?.data.toolName ?? "tool");
+    const metadataClass = ["read_file", "run_command"].includes(toolName)
+      ? "timeline-event-detail tool-metadata"
+      : "timeline-event-detail";
+
+    if (toolName === "read_file") {
+      return (
+        <div className={`tool-result ${failed ? "failed" : ""}`}>
+          <span className="tool-icon">
+            <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
+          </span>
+          <span className="timeline-event-verb">{presentation.verb}</span>
+          {presentation.code && (
+            <span className="timeline-event-code" title={presentation.code}>{presentation.code}</span>
+          )}
+          <span className={metadataClass}>{presentation.detail}</span>
+        </div>
+      );
+    }
+
+    const listedFiles = toolName === "list_files" && Array.isArray(block?.data.files)
+      ? block.data.files.map(String)
+      : [];
     return (
       <details className={`tool-message ${failed ? "failed" : ""}`}>
         <summary>
@@ -810,10 +888,13 @@ function Message({ message }: { message: MessageView }) {
           <span className="tool-icon">
             <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
           </span>
-          <span className="timeline-event-verb">{toolLabel(block?.data.toolName)}</span>
-          <span className="timeline-event-detail">{failed ? "Failed" : "Completed"}</span>
+          <span className="timeline-event-verb">{presentation.verb}</span>
+          {presentation.code && (
+            <span className="timeline-event-code" title={presentation.code}>{presentation.code}</span>
+          )}
+          <span className={metadataClass}>{presentation.detail}</span>
         </summary>
-        <pre>{messageText(message)}</pre>
+        <pre>{listedFiles.length > 0 ? listedFiles.join("\n") : messageText(message)}</pre>
       </details>
     );
   }

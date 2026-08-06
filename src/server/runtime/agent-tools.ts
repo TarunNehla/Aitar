@@ -37,7 +37,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     }),
     execute: async (_callId, params: any) => {
       const files = await workspaceManager.listFiles(context.repositoryPath, Number(params.limit ?? 500));
-      return textResult(files.join("\n"), { count: files.length });
+      return textResult(files.join("\n"), { count: files.length, files });
     },
   };
 
@@ -49,8 +49,10 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     execute: async (_callId, params: any) => {
       const path = String(params.path);
       const content = await workspaceManager.readFile(context.repositoryPath, path);
-      toolLogger.debug({ path, bytes: Buffer.byteLength(content) }, "Repository file read");
-      return textResult(content, { path });
+      const bytes = Buffer.byteLength(content);
+      const lines = content.length === 0 ? 0 : content.split(/\r\n|\r|\n/).length;
+      toolLogger.debug({ path, bytes, lines }, "Repository file read");
+      return textResult(content, { path, bytes, lines });
     },
   };
 
@@ -68,7 +70,8 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         String(params.query),
         Number(params.limit ?? 200),
       );
-      return textResult(result || "No matches found.");
+      const matches = result.split("\n").filter(Boolean).length;
+      return textResult(result || "No matches found.", { query: String(params.query), matches });
     },
   };
 
@@ -147,6 +150,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         throw new Error(output.text || `Command exited with code ${result.exitCode}`);
       }
       return textResult(output.text, {
+        command,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         stdoutBytes: result.stdoutBytes,

@@ -140,7 +140,7 @@ function assistantBlocks(message: AssistantMessage): Array<{
   return blocks;
 }
 
-function toolBlocks(message: ToolResultMessage) {
+function toolBlocks(message: ToolResultMessage, toolArguments?: Record<string, unknown>) {
   if (message.toolName === "finish") {
     const text = message.content.map((block) => (block.type === "text" ? block.text : "[image]")).join("\n");
     return [{
@@ -154,6 +154,7 @@ function toolBlocks(message: ToolResultMessage) {
     toolName: message.toolName,
     isError: message.isError,
     details: message.details,
+    arguments: toolArguments,
   });
   return [
     {
@@ -358,8 +359,16 @@ export class AgentWorker {
       });
 
       activeRuns.set(run.id, agent);
+      const toolArgumentsByCall = new Map<string, Record<string, unknown>>();
       agent.subscribe(async (event) => {
-        await this.handleAgentEvent({ event, run, writer, getParent: () => parentMessageId, setParent: (id) => (parentMessageId = id) });
+        await this.handleAgentEvent({
+          event,
+          run,
+          writer,
+          toolArgumentsByCall,
+          getParent: () => parentMessageId,
+          setParent: (id) => (parentMessageId = id),
+        });
 
         if (event.type === "turn_start") {
           turns += 1;
@@ -414,6 +423,7 @@ export class AgentWorker {
     event: AgentEvent;
     run: ClaimedRun;
     writer: EventWriter;
+    toolArgumentsByCall: Map<string, Record<string, unknown>>;
     getParent: () => string | null;
     setParent: (id: string) => void;
   }): Promise<void> {
@@ -456,13 +466,15 @@ export class AgentWorker {
     }
 
     if (event.type === "message_end" && event.message.role === "toolResult") {
+      const toolArguments = input.toolArgumentsByCall.get(event.message.toolCallId);
       const stored = await createAgentMessage({
         sessionId: run.session_id,
         runId: run.id,
         parentMessageId: input.getParent(),
         role: "tool",
-        blocks: toolBlocks(event.message),
+        blocks: toolBlocks(event.message, toolArguments),
       });
+      input.toolArgumentsByCall.delete(event.message.toolCallId);
       input.setParent(stored.id);
       return;
     }
@@ -474,6 +486,7 @@ export class AgentWorker {
       );
       const durable = ["run_command", "write_file"].includes(event.toolName);
       const safeArguments = safeToolArguments(event.toolName, event.args);
+      input.toolArgumentsByCall.set(event.toolCallId, safeArguments);
       if (durable) await startToolExecution({
         runId: run.id,
         callId: event.toolCallId,
@@ -496,6 +509,7 @@ export class AgentWorker {
         toolName: event.toolName,
         isError: event.isError,
         details: event.result?.details,
+        arguments: input.toolArgumentsByCall.get(event.toolCallId),
       });
       const toolLogData = {
         runId: run.id,
