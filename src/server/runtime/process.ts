@@ -7,6 +7,9 @@ export interface ProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+  durationMs: number;
 }
 
 export async function runProcess(
@@ -19,6 +22,7 @@ export async function runProcess(
     input?: string;
     onStdout?: (chunk: string) => void;
     onStderr?: (chunk: string) => void;
+    captureTail?: boolean;
   } = {},
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
@@ -33,8 +37,15 @@ export async function runProcess(
 
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     const maxCapturedBytes = 512 * 1024;
+    const capture = (current: string, chunk: string) => {
+      if (!options.captureTail) return current.length < maxCapturedBytes ? current + chunk : current;
+      const combined = current + chunk;
+      return combined.length > maxCapturedBytes ? combined.slice(-maxCapturedBytes) : combined;
+    };
 
     const finish = (callback: () => void) => {
       if (settled) return;
@@ -66,13 +77,15 @@ export async function runProcess(
 
     child.stdout!.on("data", (buffer: Buffer) => {
       const chunk = buffer.toString();
-      if (stdout.length < maxCapturedBytes) stdout += chunk;
+      stdoutBytes += buffer.length;
+      stdout = capture(stdout, chunk);
       options.onStdout?.(chunk);
     });
 
     child.stderr!.on("data", (buffer: Buffer) => {
       const chunk = buffer.toString();
-      if (stderr.length < maxCapturedBytes) stderr += chunk;
+      stderrBytes += buffer.length;
+      stderr = capture(stderr, chunk);
       options.onStderr?.(chunk);
     });
 
@@ -88,16 +101,17 @@ export async function runProcess(
     child.on("close", (code) => {
       finish(() => {
         const exitCode = code ?? 1;
+        const durationMs = Date.now() - startedAt;
         const data = {
           executable: command,
           exitCode,
-          durationMs: Date.now() - startedAt,
-          stdoutBytes: Buffer.byteLength(stdout),
-          stderrBytes: Buffer.byteLength(stderr),
+          durationMs,
+          stdoutBytes,
+          stderrBytes,
         };
         if (exitCode === 0) processLogger.debug(data, "Process completed");
         else processLogger.debug(data, "Process exited with a non-zero status");
-        resolve({ stdout, stderr, exitCode });
+        resolve({ stdout, stderr, exitCode, stdoutBytes, stderrBytes, durationMs });
       });
     });
 

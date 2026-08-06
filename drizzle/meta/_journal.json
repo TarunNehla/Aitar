@@ -15,6 +15,13 @@
       "when": 1785670164359,
       "tag": "0001_whole_mephistopheles",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785994326790,
+      "tag": "0002_huge_human_torch",
+      "breakpoints": true
     }
   ]
 }

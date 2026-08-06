@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { runChecked } from "./process.js";
-import { safeWorkspacePath, validateRepositoryUrl, workspaceManager } from "./workspace-manager.js";
+import { repositoryMirrorPath, safeWorkspacePath, validateRepositoryUrl, workspaceManager } from "./workspace-manager.js";
 
 const temporaryPaths: string[] = [];
 
@@ -39,10 +39,18 @@ describe("Git checkpoints", () => {
     await runChecked("git", ["commit", "-m", "initial"], { cwd: repository });
     await runChecked("git", ["checkout", "-b", "cloud-agent/test-workspace"], { cwd: repository });
     const baseCommit = (await runChecked("git", ["rev-parse", "HEAD"], { cwd: repository })).stdout.trim();
+    const repositoryId = "checkpoint-repository";
+    const mirror = repositoryMirrorPath(repositoryId);
+    temporaryPaths.push(mirror);
+    await mkdir(join(mirror, ".."), { recursive: true });
+    await runChecked("git", ["init", "--bare", mirror]);
 
     await writeFile(join(repository, "new-file.txt"), "checkpointed\n");
+    await mkdir(join(repository, "node_modules", "generated"), { recursive: true });
+    await writeFile(join(repository, "node_modules", "generated", "index.js"), "ignored\n");
     const checkpoint = await workspaceManager.checkpoint({
-      workspaceId: "test-workspace",
+      chatId: "test-workspace",
+      repositoryId,
       repositoryPath: repository,
       runId: "test-run",
       baseCommit,
@@ -50,6 +58,7 @@ describe("Git checkpoints", () => {
 
     expect(checkpoint.checkpointCommit).not.toBe(baseCommit);
     expect(checkpoint.changedFiles).toContainEqual({ status: "A", path: "new-file.txt" });
+    expect(checkpoint.changedFiles.map((file) => file.path)).not.toContain("node_modules/generated/index.js");
 
     const changes = await workspaceManager.codeChanges(repository, baseCommit, checkpoint.checkpointCommit);
     expect(changes.files).toHaveLength(1);

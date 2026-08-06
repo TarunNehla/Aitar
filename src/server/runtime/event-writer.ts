@@ -1,9 +1,11 @@
 import { appendEvent } from "../db/store.js";
+import { eventHub } from "../events/event-hub.js";
 
 export class EventWriter {
   private queue = Promise.resolve();
   private pendingDelta: { type: string; key: string; value: string; payload: Record<string, unknown> } | null = null;
   private timer: NodeJS.Timeout | null = null;
+  private liveSequence = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -16,6 +18,19 @@ export class EventWriter {
       await appendEvent({ sessionId: this.sessionId, runId: this.runId, type, payload });
     });
     return this.queue;
+  }
+
+  live(type: string, payload: Record<string, unknown> = {}): void {
+    eventHub.publish({
+      id: `live-${Date.now()}-${this.liveSequence++}`,
+      sessionId: this.sessionId,
+      runId: this.runId,
+      sequence: 0,
+      type,
+      payload,
+      createdAt: new Date().toISOString(),
+      transient: true,
+    });
   }
 
   delta(type: string, key: string, value: string, payload: Record<string, unknown> = {}): void {
@@ -42,6 +57,10 @@ export class EventWriter {
       this.timer = setTimeout(() => this.flushDelta(), 200);
       this.timer.unref();
     }
+  }
+
+  liveDelta(type: string, key: string, value: string, payload: Record<string, unknown> = {}): void {
+    this.live(type, { ...payload, [key]: value });
   }
 
   private flushDelta(): void {

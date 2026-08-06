@@ -18,6 +18,7 @@ export interface SessionEvent {
   type: string;
   payload: Record<string, unknown>;
   createdAt: string;
+  transient?: boolean;
 }
 
 export interface MessageBlockView {

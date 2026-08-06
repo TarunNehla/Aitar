@@ -6,9 +6,10 @@ import type { EventWriter } from "./event-writer.js";
 import { workspaceManager } from "./workspace-manager.js";
 import { createApproval } from "../db/store.js";
 import { logger } from "../logger.js";
+import { commandResultText } from "./output-policy.js";
 
 interface ToolContext {
-  workspaceId: string;
+  chatId: string;
   repositoryPath: string;
   sessionId: string;
   runId: string;
@@ -25,7 +26,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     component: "agent-tools",
     runId: context.runId,
     sessionId: context.sessionId,
-    workspaceId: context.workspaceId,
+    chatId: context.chatId,
   });
   const listFiles: AgentTool = {
     name: "list_files",
@@ -85,7 +86,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
       const content = String(params.content);
       await workspaceManager.writeFile(context.repositoryPath, path, content);
       toolLogger.info({ path, bytes: Buffer.byteLength(content) }, "Repository file written");
-      await context.writer.emit("file_changed", { path, operation: "write", bytes: Buffer.byteLength(content) });
+      context.writer.live("file_changed", { path, operation: "write", bytes: Buffer.byteLength(content) });
       return textResult(`Wrote ${path}.`, { path, bytes: Buffer.byteLength(content) });
     },
   };
@@ -117,7 +118,6 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         });
         await context.writer.emit("approval_requested", {
           approvalId: approval.id,
-          command,
           reason: approval.reason,
         });
         const approved = await approvalBroker.wait(approval.id, signal);
@@ -127,25 +127,32 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         if (!approved) throw new Error("The user denied or did not answer the approval request");
       }
 
-      const result = await workspaceManager.execute(context.workspaceId, context.repositoryPath, command, {
+      const result = await workspaceManager.execute(context.chatId, context.repositoryPath, command, {
         signal,
         network,
+        captureTail: true,
         onStdout: (chunk) => {
-          context.writer.delta("stdout_chunk", "chunk", chunk, { callId });
+          context.writer.liveDelta("stdout_chunk", "chunk", chunk, { callId });
           onUpdate?.(textResult(chunk, { stream: "stdout" }));
         },
         onStderr: (chunk) => {
-          context.writer.delta("stderr_chunk", "chunk", chunk, { callId });
+          context.writer.liveDelta("stderr_chunk", "chunk", chunk, { callId });
           onUpdate?.(textResult(chunk, { stream: "stderr" }));
         },
       });
       await context.writer.drain();
 
-      const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+      const output = commandResultText(result);
       if (result.exitCode !== 0) {
-        throw new Error(output || `Command exited with code ${result.exitCode}`);
+        throw new Error(output.text || `Command exited with code ${result.exitCode}`);
       }
-      return textResult(output || "Command completed with no output.", { exitCode: result.exitCode });
+      return textResult(output.text, {
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        stdoutBytes: result.stdoutBytes,
+        stderrBytes: result.stderrBytes,
+        outputTruncated: output.truncated,
+      });
     },
   };
 
@@ -156,7 +163,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     parameters: Type.Object({}),
     execute: async () => {
       const result = await workspaceManager.execute(
-        context.workspaceId,
+        context.chatId,
         context.repositoryPath,
         `git diff --binary ${context.baseCommit}..HEAD && git diff --binary`,
       );

@@ -53,6 +53,11 @@ a { color: inherit; }
 .eyebrow { margin: 0 0 10px; color: #838c87; font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .session-list { flex: 1; overflow: auto; }
 .session-list .eyebrow { padding: 0 9px; }
+.repository-group { margin: 0 0 12px; }
+.repository-title { display: flex; align-items: center; gap: 6px; padding: 5px 6px 5px 10px; }
+.repository-title strong { flex: 1; overflow: hidden; color: #d7ded9; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.repository-title button { width: 22px; height: 22px; padding: 0; color: #94a49c; background: transparent; border: 1px solid #35413c; border-radius: 6px; }
+.repository-group .session-button { padding-left: 18px; }
 .session-button {
   width: 100%;
   padding: 10px 11px;
@@ -74,6 +79,8 @@ a { color: inherit; }
 .conversation-header { display: flex; justify-content: space-between; align-items: center; height: 72px; padding: 0 28px; border-bottom: 1px solid var(--line); }
 .conversation-header h1 { margin: 0 0 3px; font-family: Georgia, serif; font-size: 19px; }
 .conversation-header a { color: var(--muted); font-size: 11px; text-decoration: none; }
+.branch-label { display: inline-block; margin-left: 9px; padding: 2px 6px; color: #64716a; background: #eceee9; border-radius: 5px; font-size: 9px; }
+.base-label { margin-left: 7px; color: #969e99; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; }
 .run-state { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; text-transform: capitalize; }
 .run-state span { width: 7px; height: 7px; border-radius: 50%; background: #6bad75; box-shadow: 0 0 0 3px #dcebdd; }
 .run-state.working span { background: #d89c3f; box-shadow: 0 0 0 3px #f3e6cf; animation: pulse 1.2s infinite; }
@@ -97,6 +104,7 @@ a { color: inherit; }
 .tool-message summary::-webkit-details-marker { display: none; }
 .tool-message summary small { margin-left: auto; color: #9aa19d; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .tool-message.failed { color: #8b4444; background: #fbf1f1; border-color: #ead3d3; }
+.tool-message.live-tool-output { border-color: #e2d5bc; }
 .tool-icon { display: grid; place-items: center; width: 20px; height: 20px; color: var(--green); background: var(--green-soft); border-radius: 6px; font-size: 15px; font-weight: 800; }
 .tool-message pre { max-height: 280px; overflow: auto; margin: 0; padding: 13px 14px; color: #bdc9c1; background: #171d1a; border-radius: 0 0 9px 9px; white-space: pre-wrap; }
 

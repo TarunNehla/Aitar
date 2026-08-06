@@ -9,7 +9,6 @@ import {
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { config } from "../config.js";
 import {
-  appendEvent,
   activateQueuedMessage,
   claimPendingRun,
   createAgentMessage,
@@ -22,12 +21,15 @@ import {
   renewRunLease,
   saveCheckpoint,
   startToolExecution,
+  updateSessionEnvironment,
+  updateSessionHead,
 } from "../db/store.js";
 import type { MessageView } from "../../shared/contracts.js";
 import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
 import { workspaceManager } from "./workspace-manager.js";
+import { boundedTail, persistedToolSummary, safeToolArguments } from "./output-policy.js";
 
 const models = createModels();
 models.setProvider(openrouterProvider());
@@ -118,31 +120,46 @@ function toPiMessage(message: MessageView): AgentMessage | null {
   return null;
 }
 
-function assistantBlocks(message: AssistantMessage) {
-  return message.content.map((block) => {
-    if (block.type === "text") return { type: "text", text: block.text, visibility: "both" };
-    if (block.type === "thinking") {
-      return {
-        type: "reasoning_summary",
-        text: block.thinking,
-        data: { redacted: block.redacted ?? false, signature: block.thinkingSignature },
+function assistantBlocks(message: AssistantMessage): Array<{
+  type: string;
+  text?: string;
+  data?: Record<string, unknown>;
+  visibility: string;
+}> {
+  const blocks: Array<{ type: string; text?: string; data?: Record<string, unknown>; visibility: string }> = [];
+  for (const block of message.content) {
+    if (block.type === "text") blocks.push({ type: "text", text: block.text, visibility: "both" });
+    if (block.type === "toolCall") {
+      blocks.push({
+        type: "tool_call",
+        data: { callId: block.id, name: block.name, arguments: safeToolArguments(block.name, block.arguments) },
         visibility: "model",
-      };
+      });
     }
-    return {
-      type: "tool_call",
-      data: { callId: block.id, name: block.name, arguments: block.arguments },
-      visibility: "model",
-    };
-  });
+  }
+  return blocks;
 }
 
 function toolBlocks(message: ToolResultMessage) {
+  if (message.toolName === "finish") {
+    const text = message.content.map((block) => (block.type === "text" ? block.text : "[image]")).join("\n");
+    return [{
+      type: "tool_result",
+      text: boundedTail(text, 50_000).text,
+      data: { callId: message.toolCallId, toolName: message.toolName, isError: message.isError },
+      visibility: "both",
+    }];
+  }
+  const summary = persistedToolSummary({
+    toolName: message.toolName,
+    isError: message.isError,
+    details: message.details,
+  });
   return [
     {
       type: "tool_result",
-      text: message.content.map((block) => (block.type === "text" ? block.text : "[image]")).join("\n"),
-      data: { callId: message.toolCallId, toolName: message.toolName, isError: message.isError },
+      text: summary.text,
+      data: { callId: message.toolCallId, toolName: message.toolName, isError: message.isError, ...summary.data },
       visibility: "model",
     },
   ];
@@ -248,7 +265,7 @@ export class AgentWorker {
     const runLog = this.log.child({
       runId: run.id,
       sessionId: run.session_id,
-      workspaceId: relation.workspace.id,
+      repositoryId: relation.repository.id,
       model: run.model,
     });
     runLog.info({ maxTurns: run.max_turns, maxCostUsd: run.max_cost_usd }, "Agent run started");
@@ -259,46 +276,64 @@ export class AgentWorker {
     let costUsd = 0;
     let turns = 0;
     let parentMessageId = relation.session.currentLeafMessageId;
+    const runBaseCommit = relation.session.headCommit;
+    let repositoryPath = "";
 
     const checkpoint = async () => {
-      if (!relation.workspace.baseCommit) return null;
+      if (!runBaseCommit || !repositoryPath) return null;
       const result = await workspaceManager.checkpoint({
-        workspaceId: relation.workspace.id,
-        repositoryPath: relation.workspace.localPath,
+        chatId: relation.session.id,
+        repositoryId: relation.repository.id,
+        repositoryPath,
         runId: run.id,
-        baseCommit: relation.workspace.baseCommit,
+        baseCommit: runBaseCommit!,
       });
       if (!result.createdCommit) return null;
       await saveCheckpoint({
-        workspaceId: relation.workspace.id,
+        sessionId: relation.session.id,
         runId: run.id,
-        baseCommit: relation.workspace.baseCommit,
+        baseCommit: runBaseCommit,
         checkpointCommit: result.checkpointCommit,
         internalRef: result.internalRef,
       });
+      await updateSessionHead(relation.session.id, result.checkpointCommit);
       await writer.emit("checkpoint_saved", {
         commit: result.checkpointCommit,
         createdCommit: true,
-        changedFiles: result.changedFiles,
+        changedFileCount: result.changedFiles.length,
       });
       return result;
     };
 
     try {
       if (!config.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not configured");
-      if (!relation.workspace.baseCommit) throw new Error("Workspace is not ready");
+      if (!relation.session.baseCommit || !relation.session.headCommit) throw new Error("Chat environment is not ready");
 
-      await workspaceManager.ensureSandbox(relation.workspace.id, relation.workspace.localPath);
+      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "starting" });
+      const location = await workspaceManager.ensureChatCheckout({
+        chatId: relation.session.id,
+        repositoryId: relation.repository.id,
+        repositoryUrl: relation.repository.repositoryUrl,
+        baseBranch: relation.session.baseBranch,
+        branchName: relation.session.branchName,
+        headCommit: relation.session.headCommit,
+        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
+          ? relation.session.settings.legacy_workspace_id
+          : undefined,
+      });
+      repositoryPath = location.repository;
+      await workspaceManager.ensureSandbox(relation.session.id, repositoryPath);
+      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
       await writer.emit("run_started", { model: run.model, workerId: this.workerId });
 
       const branch = await getActiveBranchMessages(run.session_id);
       const history = branch.map(toPiMessage).filter((message): message is AgentMessage => Boolean(message));
       const tools = createAgentTools({
-        workspaceId: relation.workspace.id,
-        repositoryPath: relation.workspace.localPath,
+        chatId: relation.session.id,
+        repositoryPath,
         sessionId: run.session_id,
         runId: run.id,
-        baseCommit: relation.workspace.baseCommit,
+        baseCommit: runBaseCommit!,
         writer,
       });
 
@@ -320,10 +355,6 @@ export class AgentWorker {
         getApiKey: () => config.OPENROUTER_API_KEY,
         sessionId: run.session_id,
         toolExecution: "sequential",
-        afterToolCall: async ({ toolCall }) => {
-          if (["write_file", "run_command"].includes(toolCall.name)) await checkpoint();
-          return undefined;
-        },
       });
 
       activeRuns.set(run.id, agent);
@@ -353,6 +384,7 @@ export class AgentWorker {
 
       const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
       await finishRun({ runId: run.id, status, inputTokens, outputTokens, costUsd });
+      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
       await writer.emit("run_completed", { status, inputTokens, outputTokens, costUsd, turns });
       runLog.info(
         { status, inputTokens, outputTokens, costUsd, turns, durationMs: Date.now() - startedAt },
@@ -370,6 +402,7 @@ export class AgentWorker {
         // Preserve the original run error.
       }
       await finishRun({ runId: run.id, status: "failed", inputTokens, outputTokens, costUsd, error: message });
+      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: repositoryPath ? "ready" : "failed" });
       await writer.emit("run_failed", { error: message });
     } finally {
       activeRuns.delete(run.id);
@@ -439,45 +472,54 @@ export class AgentWorker {
         { runId: run.id, sessionId: run.session_id, toolCallId: event.toolCallId, toolName: event.toolName },
         "Agent tool started",
       );
-      await startToolExecution({
+      const durable = ["run_command", "write_file"].includes(event.toolName);
+      const safeArguments = safeToolArguments(event.toolName, event.args);
+      if (durable) await startToolExecution({
         runId: run.id,
         callId: event.toolCallId,
         toolName: event.toolName,
-        arguments: event.args ?? {},
+        arguments: safeArguments,
       });
-      await writer.emit("tool_started", {
+      const payload = {
         callId: event.toolCallId,
         toolName: event.toolName,
-        arguments: event.args ?? {},
-      });
+        arguments: safeArguments,
+      };
+      if (durable) await writer.emit("tool_started", payload);
+      else writer.live("tool_started", payload);
       return;
     }
 
     if (event.type === "tool_execution_end") {
-      const text = event.result?.content
-        ?.map((block: { type: string; text?: string }) => (block.type === "text" ? block.text : "[image]"))
-        .join("\n");
+      const durable = ["run_command", "write_file"].includes(event.toolName);
+      const summary = persistedToolSummary({
+        toolName: event.toolName,
+        isError: event.isError,
+        details: event.result?.details,
+      });
       const toolLogData = {
         runId: run.id,
         sessionId: run.session_id,
         toolCallId: event.toolCallId,
         toolName: event.toolName,
-        resultBytes: Buffer.byteLength(text ?? ""),
       };
       if (event.isError) this.log.warn(toolLogData, "Agent tool failed");
       else this.log.info(toolLogData, "Agent tool completed");
-      await finishToolExecution({
+      if (durable) await finishToolExecution({
         runId: run.id,
         callId: event.toolCallId,
         status: event.isError ? "failed" : "completed",
-        result: { text: text ?? "", details: event.result?.details ?? null },
+        result: { summary: summary.text, ...summary.data },
+        exitCode: typeof summary.data.exitCode === "number" ? summary.data.exitCode : undefined,
       });
-      await writer.emit("tool_completed", {
+      const payload = {
         callId: event.toolCallId,
         toolName: event.toolName,
         isError: event.isError,
-        result: text?.slice(0, 20_000) ?? "",
-      });
+        summary: summary.text,
+      };
+      if (durable) await writer.emit("tool_completed", payload);
+      else writer.live("tool_completed", payload);
     }
   }
 }

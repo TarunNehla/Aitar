@@ -7,6 +7,7 @@ import { closeDatabase } from "./db/client.js";
 import { agentWorker } from "./runtime/agent-runner.js";
 import { config } from "./config.js";
 import { errorForLog, logger } from "./logger.js";
+import { environmentReaper } from "./runtime/environment-reaper.js";
 
 const app = createApi();
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -21,6 +22,7 @@ const server = app.listen(config.PORT, () => {
   void agentWorker
     .start()
     .then(() => {
+      environmentReaper.start();
       logger.info(
         {
           port: config.PORT,
@@ -44,6 +46,7 @@ async function shutdown(reason: string, exitCode = 0) {
   shuttingDown = true;
   logger.info({ reason }, "Backend shutdown started");
   agentWorker.stop();
+  environmentReaper.stop();
   server.close();
   try {
     await closeDatabase();

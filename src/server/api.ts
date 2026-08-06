@@ -4,11 +4,10 @@ import express from "express";
 import { z } from "zod";
 import { errorForLog, httpLogger } from "./logger.js";
 import {
-  createProject,
+  createRepository,
   createQueuedUserMessage,
   createSession,
   createUserMessageAndRun,
-  createWorkspace,
   deleteQueuedMessage,
   finishRun,
   getActiveBranchMessages,
@@ -19,33 +18,30 @@ import {
   getRun,
   getSession,
   listEvents,
-  listProjects,
+  getRepository,
+  listRepositories,
   listSessionRuns,
   listSessions,
-  listWorkspaces,
   markRunCancelling,
   resolveApproval,
-  updateWorkspaceReady,
-  updateWorkspaceStatus,
+  updateRepositoryFetched,
+  updateSessionEnvironment,
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
 import { activeRuns } from "./runtime/agent-runner.js";
 import { approvalBroker } from "./runtime/approval-broker.js";
-import { validateRepositoryUrl, workspaceLocation, workspaceManager } from "./runtime/workspace-manager.js";
+import { chatBranchName, validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
 
-const projectInput = z.object({
+const repositoryInput = z.object({
   name: z.string().trim().min(1).max(100),
   repositoryUrl: z.string().url(),
-});
-
-const workspaceInput = z.object({
-  name: z.string().trim().min(1).max(100).default("Main workspace"),
-  baseBranch: z.string().trim().min(1).max(200).default("main"),
+  defaultBranch: z.string().trim().min(1).max(200).default("main"),
 });
 
 const sessionInput = z.object({
   title: z.string().trim().min(1).max(120).default("New session"),
   model: z.string().trim().min(1).optional(),
+  baseBranch: z.string().trim().min(1).max(200).optional(),
 });
 
 const messageInput = z.object({
@@ -77,61 +73,69 @@ export function createApi() {
   });
 
   app.get(
-    "/api/projects",
+    "/api/repositories",
     asyncRoute(async (_request, response) => {
-      response.json({ projects: await listProjects() });
+      response.json({ repositories: await listRepositories() });
     }),
   );
 
   app.post(
-    "/api/projects",
+    "/api/repositories",
     asyncRoute(async (request, response) => {
-      const input = projectInput.parse(request.body);
+      const input = repositoryInput.parse(request.body);
       validateRepositoryUrl(input.repositoryUrl);
-      const project = await createProject(input);
-      response.status(201).json({ project });
-    }),
-  );
-
-  app.get(
-    "/api/workspaces",
-    asyncRoute(async (request, response) => {
-      const projectId = typeof request.query.projectId === "string" ? request.query.projectId : undefined;
-      response.json({ workspaces: await listWorkspaces(projectId) });
+      const repositoryId = randomUUID();
+      await workspaceManager.prepareRepository({
+        repositoryId,
+        repositoryUrl: input.repositoryUrl,
+        baseBranch: input.defaultBranch,
+      });
+      const repository = await createRepository({ id: repositoryId, ...input });
+      await updateRepositoryFetched(repository.id);
+      response.status(201).json({ repository });
     }),
   );
 
   app.post(
-    "/api/projects/:projectId/workspaces",
+    "/api/repositories/:repositoryId/chats",
     asyncRoute(async (request, response) => {
-      const input = workspaceInput.parse(request.body);
-      const projectsList = await listProjects();
-      const project = projectsList.find((candidate) => candidate.id === routeParam(request, "projectId"));
-      if (!project) {
-        response.status(404).json({ error: "Project not found" });
+      const input = sessionInput.parse(request.body);
+      const repository = await getRepository(routeParam(request, "repositoryId"));
+      if (!repository) {
+        response.status(404).json({ error: "Repository not found" });
         return;
       }
 
-      const workspaceId = randomUUID();
-      const location = workspaceLocation(workspaceId);
-      const workspace = await createWorkspace({
-        id: workspaceId,
-        projectId: project.id,
-        name: input.name,
-        baseBranch: input.baseBranch,
-        localPath: location.repository,
+      const sessionId = randomUUID();
+      const baseBranch = input.baseBranch ?? repository.defaultBranch;
+      const branchName = chatBranchName(sessionId);
+      const session = await createSession({
+        id: sessionId,
+        repositoryId: repository.id,
+        title: input.title,
+        model: input.model,
+        baseBranch,
+        branchName,
       });
 
       try {
-        const prepared = await workspaceManager.prepare({
-          workspaceId,
-          repositoryUrl: project.repositoryUrl,
-          baseBranch: input.baseBranch,
+        const prepared = await workspaceManager.prepareChat({
+          chatId: sessionId,
+          repositoryId: repository.id,
+          repositoryUrl: repository.repositoryUrl,
+          baseBranch,
+          branchName,
         });
-        const ready = await updateWorkspaceReady(workspaceId, prepared.baseCommit);
-        response.status(201).json({ workspace: ready });
+        const ready = await updateSessionEnvironment({
+          sessionId,
+          envStatus: "ready",
+          baseCommit: prepared.baseCommit,
+          headCommit: prepared.headCommit,
+        });
+        await updateRepositoryFetched(repository.id);
+        response.status(201).json({ session: ready });
       } catch (error) {
-        await updateWorkspaceStatus(workspaceId, "failed");
+        await updateSessionEnvironment({ sessionId, envStatus: "failed" });
         throw error;
       }
     }),
@@ -140,17 +144,8 @@ export function createApi() {
   app.get(
     "/api/sessions",
     asyncRoute(async (request, response) => {
-      const workspaceId = typeof request.query.workspaceId === "string" ? request.query.workspaceId : undefined;
-      response.json({ sessions: await listSessions(workspaceId) });
-    }),
-  );
-
-  app.post(
-    "/api/workspaces/:workspaceId/sessions",
-    asyncRoute(async (request, response) => {
-      const input = sessionInput.parse(request.body);
-      const session = await createSession({ workspaceId: routeParam(request, "workspaceId"), ...input });
-      response.status(201).json({ session });
+      const repositoryId = typeof request.query.repositoryId === "string" ? request.query.repositoryId : undefined;
+      response.json({ sessions: await listSessions(repositoryId) });
     }),
   );
 
@@ -182,10 +177,22 @@ export function createApi() {
         response.status(404).json({ error: "Session not found" });
         return;
       }
-      if (!relation.workspace.baseCommit) {
-        response.status(409).json({ error: "Workspace is not ready" });
+      if (!relation.session.baseCommit || !relation.session.headCommit) {
+        response.status(409).json({ error: "Chat environment is not ready" });
         return;
       }
+
+      const location = await workspaceManager.ensureChatCheckout({
+        chatId: relation.session.id,
+        repositoryId: relation.repository.id,
+        repositoryUrl: relation.repository.repositoryUrl,
+        baseBranch: relation.session.baseBranch,
+        branchName: relation.session.branchName,
+        headCommit: relation.session.headCommit,
+        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
+          ? relation.session.settings.legacy_workspace_id
+          : undefined,
+      });
 
       const requestedCommit = typeof request.query.commit === "string"
         ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
@@ -197,12 +204,12 @@ export function createApi() {
         response.status(404).json({ error: "Checkpoint not found" });
         return;
       }
-      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.workspace.baseCommit;
+      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.session.headCommit;
       const baseCommit = requestedCommit && checkpoint
-        ? await workspaceManager.parentCommit(relation.workspace.localPath, checkpoint.checkpointCommit)
-        : checkpoint?.baseCommit ?? relation.workspace.baseCommit;
+        ? await workspaceManager.parentCommit(location.repository, checkpoint.checkpointCommit)
+        : checkpoint?.baseCommit ?? relation.session.baseCommit;
       const changes = await workspaceManager.codeChanges(
-        relation.workspace.localPath,
+        location.repository,
         baseCommit,
         checkpointCommit,
       );
@@ -219,10 +226,22 @@ export function createApi() {
         response.status(404).json({ error: "Session not found" });
         return;
       }
-      if (!relation.workspace.baseCommit) {
-        response.status(409).json({ error: "Workspace is not ready" });
+      if (!relation.session.baseCommit || !relation.session.headCommit) {
+        response.status(409).json({ error: "Chat environment is not ready" });
         return;
       }
+
+      const location = await workspaceManager.ensureChatCheckout({
+        chatId: relation.session.id,
+        repositoryId: relation.repository.id,
+        repositoryUrl: relation.repository.repositoryUrl,
+        baseBranch: relation.session.baseBranch,
+        branchName: relation.session.branchName,
+        headCommit: relation.session.headCommit,
+        legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
+          ? relation.session.settings.legacy_workspace_id
+          : undefined,
+      });
 
       const requestedCommit = typeof request.query.commit === "string"
         ? z.string().regex(/^[0-9a-f]{40}$/i).parse(request.query.commit)
@@ -234,12 +253,12 @@ export function createApi() {
         response.status(404).json({ error: "Checkpoint not found" });
         return;
       }
-      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.workspace.baseCommit;
+      const checkpointCommit = checkpoint?.checkpointCommit ?? relation.session.headCommit;
       const baseCommit = requestedCommit && checkpoint
-        ? await workspaceManager.parentCommit(relation.workspace.localPath, checkpoint.checkpointCommit)
-        : checkpoint?.baseCommit ?? relation.workspace.baseCommit;
+        ? await workspaceManager.parentCommit(location.repository, checkpoint.checkpointCommit)
+        : checkpoint?.baseCommit ?? relation.session.baseCommit;
       const patch = await workspaceManager.patch(
-        relation.workspace.localPath,
+        location.repository,
         baseCommit,
         checkpointCommit,
       );
@@ -290,6 +309,10 @@ export function createApi() {
       response.flushHeaders();
 
       const send = (event: Awaited<ReturnType<typeof listEvents>>[number]) => {
+        if (event.transient) {
+          response.write(`data: ${JSON.stringify(event)}\n\n`);
+          return;
+        }
         if (event.sequence <= lastSequence) return;
         lastSequence = event.sequence;
         response.write(`id: ${event.sequence}\n`);

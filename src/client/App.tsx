@@ -4,10 +4,27 @@ import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
 
+interface Repository {
+  id: string;
+  name: string;
+  repositoryUrl: string;
+  defaultBranch: string;
+}
+
 interface SessionListItem {
-  session: { id: string; title: string; workspaceId: string; defaultModel: string; status: string };
-  workspace: { id: string; name: string; status: string };
-  project: { id: string; name: string; repositoryUrl: string };
+  session: {
+    id: string;
+    title: string;
+    repositoryId: string;
+    defaultModel: string;
+    status: string;
+    branchName: string;
+    baseBranch: string;
+    baseCommit: string | null;
+    headCommit: string | null;
+    envStatus: string;
+  };
+  repository: Repository;
 }
 
 interface Run {
@@ -36,6 +53,7 @@ interface SessionDetail extends SessionListItem {
 }
 
 const activeStatuses = new Set(["pending", "running", "waiting_for_approval", "cancelling"]);
+const liveOutputLimit = 100_000;
 
 function messageText(message: MessageView): string {
   return message.blocks
@@ -81,10 +99,13 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     if (!visibleTypes.has(event.type)) continue;
     if (event.type === "tool_started" && completedToolCalls.has(String(event.payload.callId ?? ""))) continue;
     const commit = event.type === "checkpoint_saved" ? String(event.payload.commit ?? "") : "";
-    const changedFiles = Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles : [];
+    const changedFileCount = Number(
+      event.payload.changedFileCount ??
+      (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
+    );
     if (
       event.type === "checkpoint_saved" &&
-      (!commit || changedFiles.length === 0 || event.payload.createdCommit === false || seenCheckpointCommits.has(commit))
+      (!commit || changedFileCount === 0 || event.payload.createdCommit === false || seenCheckpointCommits.has(commit))
     ) {
       continue;
     }
@@ -113,12 +134,14 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
 }
 
 export function App() {
+  const [repositories, setRepositories] = useState<Repository[]>([]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [changesByCommit, setChangesByCommit] = useState<Record<string, CodeChanges>>({});
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streamingText, setStreamingText] = useState("");
+  const [liveToolOutput, setLiveToolOutput] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -136,16 +159,22 @@ export function App() {
     return result.sessions;
   }, []);
 
+  const loadRepositories = useCallback(async () => {
+    const result = await api<{ repositories: Repository[] }>("/api/repositories");
+    setRepositories(result.repositories);
+    return result.repositories;
+  }, []);
+
   const loadDetail = useCallback(async (sessionId: string) => {
     const result = await api<SessionDetail>(`/api/sessions/${sessionId}`);
     setDetail(result);
   }, []);
 
   useEffect(() => {
-    loadSessions()
+    Promise.all([loadRepositories(), loadSessions()])
       .catch((reason) => setError(reason.message))
       .finally(() => setLoading(false));
-  }, [loadSessions]);
+  }, [loadRepositories, loadSessions]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -159,6 +188,7 @@ export function App() {
     requestedChangesRef.current.clear();
     setEvents([]);
     setStreamingText("");
+    setLiveToolOutput({});
     eventReplayReadyRef.current = false;
     shouldFollowMessagesRef.current = true;
     renderedSessionRef.current = null;
@@ -170,8 +200,19 @@ export function App() {
     });
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent;
+      if (event.transient && ["stdout_chunk", "stderr_chunk"].includes(event.type)) {
+        const callId = String(event.payload.callId ?? "");
+        const chunk = String(event.payload.chunk ?? "");
+        if (callId && chunk) {
+          setLiveToolOutput((current) => {
+            const combined = `${current[callId] ?? ""}${chunk}`;
+            return { ...current, [callId]: combined.slice(-liveOutputLimit) };
+          });
+        }
+        return;
+      }
       setEvents((current) => {
-        if (current.some((candidate) => candidate.sequence === event.sequence)) return current;
+        if (current.some((candidate) => candidate.id === event.id)) return current;
         return [...current, event].slice(-300);
       });
 
@@ -183,6 +224,7 @@ export function App() {
         eventReplayReadyRef.current &&
         [
           "assistant_message_completed",
+          "tool_completed",
           "run_completed",
           "run_failed",
           "approval_requested",
@@ -190,6 +232,14 @@ export function App() {
         ].includes(event.type)
       ) {
         if (event.type === "assistant_message_completed") setStreamingText("");
+        if (event.type === "tool_completed") {
+          const callId = String(event.payload.callId ?? "");
+          setLiveToolOutput((current) => {
+            const next = { ...current };
+            delete next[callId];
+            return next;
+          });
+        }
         void loadDetail(selectedId);
         void loadSessions();
       }
@@ -244,17 +294,28 @@ export function App() {
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
-  }, [changesByCommit, detail, selectedId, streamingText]);
+  }, [changesByCommit, detail, liveToolOutput, selectedId, streamingText]);
+
+  const sessionsByRepository = useMemo(() => {
+    const groups = new Map<string, { repository: Repository; sessions: SessionListItem[] }>();
+    for (const repository of repositories) groups.set(repository.id, { repository, sessions: [] });
+    for (const item of sessions) {
+      const group = groups.get(item.repository.id) ?? { repository: item.repository, sessions: [] };
+      group.sessions.push(item);
+      groups.set(item.repository.id, group);
+    }
+    return [...groups.values()];
+  }, [repositories, sessions]);
 
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
   if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
 
-  if (sessions.length === 0) {
+  if (repositories.length === 0) {
     return (
       <Onboarding
         error={error}
         onCreated={async (sessionId) => {
-          await loadSessions();
+          await Promise.all([loadRepositories(), loadSessions()]);
           setSelectedId(sessionId);
         }}
       />
@@ -268,21 +329,45 @@ export function App() {
           <span className="brand-mark">C</span>
           <div>
             <strong>Cloud Agents</strong>
-            <small>Private workspace</small>
+            <small>Private repositories</small>
           </div>
         </div>
 
         <div className="session-list">
-          <p className="eyebrow">Sessions</p>
-          {sessions.map((item) => (
-            <button
-              className={`session-button ${item.session.id === selectedId ? "selected" : ""}`}
-              key={item.session.id}
-              onClick={() => setSelectedId(item.session.id)}
-            >
-              <span>{item.session.title}</span>
-              <small>{item.project.name}</small>
-            </button>
+          <p className="eyebrow">Repositories</p>
+          {sessionsByRepository.map((group) => (
+            <div className="repository-group" key={group.repository.id}>
+              <div className="repository-title">
+                <strong>{group.repository.name}</strong>
+                <button
+                  title="New chat"
+                  onClick={async () => {
+                    const result = await api<{ session: { id: string } }>(
+                      `/api/repositories/${group.repository.id}/chats`,
+                      {
+                        method: "POST",
+                        body: JSON.stringify({
+                          title: "New session",
+                          baseBranch: group.repository.defaultBranch,
+                        }),
+                      },
+                    );
+                    await loadSessions();
+                    setSelectedId(result.session.id);
+                  }}
+                >+</button>
+              </div>
+              {group.sessions.map((item) => (
+                <button
+                  className={`session-button ${item.session.id === selectedId ? "selected" : ""}`}
+                  key={item.session.id}
+                  onClick={() => setSelectedId(item.session.id)}
+                >
+                  <span>{item.session.title}</span>
+                  <small>{item.session.branchName}</small>
+                </button>
+              ))}
+            </div>
           ))}
         </div>
 
@@ -291,8 +376,15 @@ export function App() {
             className="new-session"
             onClick={async () => {
               const result = await api<{ session: { id: string } }>(
-                `/api/workspaces/${detail.workspace.id}/sessions`,
-                { method: "POST", body: JSON.stringify({ title: "New session", model: detail.session.defaultModel }) },
+                `/api/repositories/${detail.repository.id}/chats`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({
+                    title: "New session",
+                    model: detail.session.defaultModel,
+                    baseBranch: detail.repository.defaultBranch,
+                  }),
+                },
               );
               await loadSessions();
               setSelectedId(result.session.id);
@@ -309,9 +401,15 @@ export function App() {
             <header className="conversation-header">
               <div>
                 <h1>{detail.session.title}</h1>
-                <a href={detail.project.repositoryUrl} target="_blank" rel="noreferrer">
-                  {detail.project.name} ↗
+                <a href={detail.repository.repositoryUrl} target="_blank" rel="noreferrer">
+                  {detail.repository.name} ↗
                 </a>
+                <code className="branch-label">{detail.session.branchName}</code>
+                {detail.session.baseCommit && (
+                  <span className="base-label">
+                    Base {detail.session.baseBranch} · {detail.session.baseCommit.slice(0, 7)}
+                  </span>
+                )}
               </div>
               <div className={`run-state ${activeRun ? "working" : "ready"}`}>
                 <span />
@@ -344,6 +442,7 @@ export function App() {
                     <TimelineEvent
                       event={item.event}
                       reasoningCompleted={item.reasoningCompleted}
+                      liveOutput={liveToolOutput[String(item.event.payload.callId ?? "")]}
                     />
                     {item.changeCommit && changesByCommit[item.changeCommit] && (
                       <CodeChangesCard
@@ -402,7 +501,7 @@ export function App() {
             {error && <div className="toast">{error}</div>}
           </>
         ) : (
-          <div className="center-state">Loading session…</div>
+          <div className="center-state">Start a chat from a repository in the sidebar.</div>
         )}
       </main>
     </div>
@@ -521,9 +620,11 @@ function Composer({
 function TimelineEvent({
   event,
   reasoningCompleted,
+  liveOutput,
 }: {
   event: SessionEvent;
   reasoningCompleted: boolean;
+  liveOutput?: string;
 }) {
   let icon = "✓";
   let title = event.type.replaceAll("_", " ");
@@ -559,8 +660,11 @@ function TimelineEvent({
   } else if (event.type === "checkpoint_saved") {
     icon = "◆";
     title = "Checkpoint saved";
-    const changedFiles = Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0;
-    detail = changedFiles === 1 ? "1 changed file" : `${changedFiles} changed files`;
+    const changedFileCount = Number(
+      event.payload.changedFileCount ??
+      (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
+    );
+    detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
   } else if (event.type === "approval_requested") {
     icon = "?";
     title = "Waiting for approval";
@@ -569,6 +673,19 @@ function TimelineEvent({
   } else if (event.type === "approval_resolved") {
     title = event.payload.approved ? "Approval granted" : "Approval denied";
     tone = event.payload.approved ? "success" : "error";
+  }
+
+  if (event.type === "tool_started" && liveOutput) {
+    return (
+      <details className="tool-message live-tool-output" open>
+        <summary>
+          <span className="tool-icon">›</span>
+          <span>{toolLabel(event.payload.toolName)}</span>
+          <small>Running live</small>
+        </summary>
+        <pre>{liveOutput}</pre>
+      </details>
+    );
   }
 
   return (
@@ -699,22 +816,19 @@ function Onboarding({ error, onCreated }: { error: string | null; onCreated: (se
     setLocalError(null);
     const data = new FormData(event.currentTarget);
     try {
-      const projectResult = await api<{ project: { id: string } }>("/api/projects", {
+      const repositoryResult = await api<{ repository: { id: string } }>("/api/repositories", {
         method: "POST",
-        body: JSON.stringify({ name: data.get("name"), repositoryUrl: data.get("repositoryUrl") }),
+        body: JSON.stringify({
+          name: data.get("name"),
+          repositoryUrl: data.get("repositoryUrl"),
+          defaultBranch: data.get("baseBranch"),
+        }),
       });
-      const workspaceResult = await api<{ workspace: { id: string } }>(
-        `/api/projects/${projectResult.project.id}/workspaces`,
-        {
-          method: "POST",
-          body: JSON.stringify({ name: "Main workspace", baseBranch: data.get("baseBranch") }),
-        },
-      );
       const sessionResult = await api<{ session: { id: string } }>(
-        `/api/workspaces/${workspaceResult.workspace.id}/sessions`,
+        `/api/repositories/${repositoryResult.repository.id}/chats`,
         {
           method: "POST",
-          body: JSON.stringify({ title: "First session", model: data.get("model") }),
+          body: JSON.stringify({ title: "First session", model: data.get("model"), baseBranch: data.get("baseBranch") }),
         },
       );
       await onCreated(sessionResult.session.id);
@@ -741,7 +855,7 @@ function Onboarding({ error, onCreated }: { error: string | null; onCreated: (se
           <label>Base branch<input name="baseBranch" defaultValue="main" required /></label>
           <label>OpenRouter model<input name="model" defaultValue="deepseek/deepseek-v4-flash-0731" required /></label>
         </div>
-        <button type="submit" disabled={busy}>{busy ? "Preparing workspace…" : "Create workspace"}</button>
+        <button type="submit" disabled={busy}>{busy ? "Preparing repository…" : "Connect repository"}</button>
         <small>V0 supports public GitHub repositories.</small>
         {(localError ?? error) && <div className="form-error">{localError ?? error}</div>}
       </form>

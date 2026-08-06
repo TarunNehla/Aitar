@@ -7,102 +7,128 @@ import { db, sql } from "./client.js";
 import {
   approvalRequests,
   artifacts,
+  chatCheckpoints,
   chatSessions,
   events,
   messageBlocks,
   messages,
-  projects,
+  repositories,
   runs,
   toolExecutions,
-  workspaceCheckpoints,
-  workspaces,
 } from "./schema.js";
 
-export async function createProject(input: { name: string; repositoryUrl: string }) {
-  const [project] = await db.insert(projects).values(input).returning();
-  return project;
+export async function createRepository(input: { id: string; name: string; repositoryUrl: string; defaultBranch: string }) {
+  const [repository] = await db.insert(repositories).values(input).returning();
+  return repository;
 }
 
-export async function listProjects() {
-  return db.select().from(projects).orderBy(desc(projects.updatedAt));
+export async function listRepositories() {
+  return db.select().from(repositories).orderBy(desc(repositories.updatedAt));
 }
 
-export async function createWorkspace(input: {
-  id: string;
-  projectId: string;
-  name: string;
-  baseBranch: string;
-  localPath: string;
-}) {
-  const [workspace] = await db.insert(workspaces).values(input).returning();
-  return workspace;
+export async function getRepository(repositoryId: string) {
+  const [repository] = await db.select().from(repositories).where(eq(repositories.id, repositoryId)).limit(1);
+  return repository;
 }
 
-export async function updateWorkspaceReady(workspaceId: string, baseCommit: string) {
-  const [workspace] = await db
-    .update(workspaces)
-    .set({ baseCommit, status: "ready", updatedAt: new Date(), lastActiveAt: new Date() })
-    .where(eq(workspaces.id, workspaceId))
+export async function updateRepositoryFetched(repositoryId: string) {
+  const [repository] = await db
+    .update(repositories)
+    .set({ lastFetchedAt: new Date(), updatedAt: new Date() })
+    .where(eq(repositories.id, repositoryId))
     .returning();
-  return workspace;
+  return repository;
 }
 
-export async function updateWorkspaceStatus(workspaceId: string, status: string) {
-  await db
-    .update(workspaces)
-    .set({ status, updatedAt: new Date(), lastActiveAt: new Date() })
-    .where(eq(workspaces.id, workspaceId));
-}
-
-export async function getWorkspace(workspaceId: string) {
-  const [workspace] = await db
-    .select({ workspace: workspaces, project: projects })
-    .from(workspaces)
-    .innerJoin(projects, eq(workspaces.projectId, projects.id))
-    .where(eq(workspaces.id, workspaceId))
-    .limit(1);
-  return workspace;
-}
-
-export async function listWorkspaces(projectId?: string) {
-  const query = db
-    .select({ workspace: workspaces, project: projects })
-    .from(workspaces)
-    .innerJoin(projects, eq(workspaces.projectId, projects.id));
-  return projectId
-    ? query.where(eq(workspaces.projectId, projectId)).orderBy(desc(workspaces.updatedAt))
-    : query.orderBy(desc(workspaces.updatedAt));
-}
-
-export async function createSession(input: { workspaceId: string; title: string; model?: string }) {
+export async function createSession(input: {
+  id: string;
+  repositoryId: string;
+  title: string;
+  baseBranch: string;
+  branchName: string;
+  model?: string;
+}) {
   const [session] = await db
     .insert(chatSessions)
     .values({
-      workspaceId: input.workspaceId,
+      id: input.id,
+      repositoryId: input.repositoryId,
       title: input.title,
+      baseBranch: input.baseBranch,
+      branchName: input.branchName,
       defaultModel: input.model ?? config.OPENROUTER_MODEL,
     })
     .returning();
   return session;
 }
 
-export async function listSessions(workspaceId?: string) {
+export async function updateSessionEnvironment(input: {
+  sessionId: string;
+  envStatus: string;
+  baseCommit?: string;
+  headCommit?: string;
+}) {
+  const [session] = await db
+    .update(chatSessions)
+    .set({
+      envStatus: input.envStatus,
+      ...(input.baseCommit ? { baseCommit: input.baseCommit } : {}),
+      ...(input.headCommit ? { headCommit: input.headCommit } : {}),
+      lastActiveAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(chatSessions.id, input.sessionId))
+    .returning();
+  return session;
+}
+
+export async function updateSessionHead(sessionId: string, headCommit: string) {
+  await db
+    .update(chatSessions)
+    .set({ headCommit, envStatus: "ready", lastActiveAt: new Date(), updatedAt: new Date() })
+    .where(eq(chatSessions.id, sessionId));
+}
+
+export async function claimIdleSessionForEviction(idleBefore: Date) {
+  const [session] = await sql<Array<{ id: string; repository_id: string; head_commit: string }>>`
+    UPDATE chat_sessions
+    SET env_status = 'evicting', updated_at = NOW()
+    WHERE id = (
+      SELECT candidate.id
+      FROM chat_sessions AS candidate
+      WHERE candidate.env_status = 'ready'
+        AND candidate.head_commit IS NOT NULL
+        AND candidate.last_active_at < ${idleBefore}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM runs
+          WHERE runs.session_id = candidate.id
+            AND runs.status IN ('pending', 'running', 'waiting_for_approval', 'cancelling')
+        )
+      ORDER BY candidate.last_active_at
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    RETURNING id, repository_id, head_commit
+  `;
+  return session;
+}
+
+export async function listSessions(repositoryId?: string) {
   const query = db
-    .select({ session: chatSessions, workspace: workspaces, project: projects })
+    .select({ session: chatSessions, repository: repositories })
     .from(chatSessions)
-    .innerJoin(workspaces, eq(chatSessions.workspaceId, workspaces.id))
-    .innerJoin(projects, eq(workspaces.projectId, projects.id));
-  return workspaceId
-    ? query.where(eq(chatSessions.workspaceId, workspaceId)).orderBy(desc(chatSessions.updatedAt))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id));
+  return repositoryId
+    ? query.where(eq(chatSessions.repositoryId, repositoryId)).orderBy(desc(chatSessions.updatedAt))
     : query.orderBy(desc(chatSessions.updatedAt));
 }
 
 export async function getSession(sessionId: string) {
   const [result] = await db
-    .select({ session: chatSessions, workspace: workspaces, project: projects })
+    .select({ session: chatSessions, repository: repositories })
     .from(chatSessions)
-    .innerJoin(workspaces, eq(chatSessions.workspaceId, workspaces.id))
-    .innerJoin(projects, eq(workspaces.projectId, projects.id))
+    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
     .where(eq(chatSessions.id, sessionId))
     .limit(1);
   return result;
@@ -119,26 +145,27 @@ export async function createUserMessageAndRun(input: {
       .select()
       .from(chatSessions)
       .where(eq(chatSessions.id, input.sessionId))
-      .limit(1);
+      .limit(1)
+      .for("update");
 
     if (!session) {
       throw new Error("Session not found");
     }
+    if (session.envStatus === "evicting") throw new Error("This chat environment is being cleaned up");
 
     const active = await tx
       .select({ id: runs.id })
       .from(runs)
-      .innerJoin(chatSessions, eq(runs.sessionId, chatSessions.id))
       .where(
         and(
-          eq(chatSessions.workspaceId, session.workspaceId),
+          eq(runs.sessionId, session.id),
           inArray(runs.status, ["pending", "running", "waiting_for_approval", "cancelling"]),
         ),
       )
       .limit(1);
 
     if (active.length > 0) {
-      throw new Error("This workspace already has an active run");
+      throw new Error("This chat already has an active run");
     }
 
     const [message] = await tx
@@ -162,7 +189,6 @@ export async function createUserMessageAndRun(input: {
       .insert(runs)
       .values({
         sessionId: input.sessionId,
-        workspaceId: session.workspaceId,
         userMessageId: message.id,
         model: input.model ?? session.defaultModel,
         maxCostUsd: config.RUN_MAX_COST_USD,
@@ -173,7 +199,7 @@ export async function createUserMessageAndRun(input: {
     await tx.update(messages).set({ runId: run.id }).where(eq(messages.id, message.id));
     await tx
       .update(chatSessions)
-      .set({ currentLeafMessageId: message.id, updatedAt: new Date() })
+      .set({ currentLeafMessageId: message.id, lastActiveAt: new Date(), updatedAt: new Date() })
       .where(eq(chatSessions.id, input.sessionId));
 
     return { message, run };
@@ -618,6 +644,7 @@ export async function resolveApproval(id: string, approved: boolean) {
     .update(approvalRequests)
     .set({
       status: approved ? "approved" : "denied",
+      command: null,
       resolvedBy: "user",
       resolvedAt: new Date(),
     })
@@ -639,41 +666,38 @@ export async function getPendingApprovals(sessionId: string) {
 }
 
 export async function saveCheckpoint(input: {
-  workspaceId: string;
+  sessionId: string;
   runId?: string;
   baseCommit: string;
   checkpointCommit: string;
   internalRef: string;
 }) {
-  const [checkpoint] = await db.insert(workspaceCheckpoints).values(input).returning();
+  const [checkpoint] = await db.insert(chatCheckpoints).values(input).returning();
   return checkpoint;
 }
 
 export async function getLatestCheckpointForSession(sessionId: string) {
   const [result] = await db
-    .select({ checkpoint: workspaceCheckpoints })
-    .from(workspaceCheckpoints)
-    .innerJoin(runs, eq(workspaceCheckpoints.runId, runs.id))
-    .where(eq(runs.sessionId, sessionId))
-    .orderBy(desc(workspaceCheckpoints.createdAt))
+    .select({ checkpoint: chatCheckpoints })
+    .from(chatCheckpoints)
+    .where(eq(chatCheckpoints.sessionId, sessionId))
+    .orderBy(desc(chatCheckpoints.createdAt))
     .limit(1);
   return result?.checkpoint;
 }
 
 export async function getCheckpointForSession(sessionId: string, checkpointCommit: string) {
   const [result] = await db
-    .select({ checkpoint: workspaceCheckpoints })
-    .from(workspaceCheckpoints)
-    .innerJoin(runs, eq(workspaceCheckpoints.runId, runs.id))
-    .where(and(eq(runs.sessionId, sessionId), eq(workspaceCheckpoints.checkpointCommit, checkpointCommit)))
-    .orderBy(desc(workspaceCheckpoints.createdAt))
+    .select({ checkpoint: chatCheckpoints })
+    .from(chatCheckpoints)
+    .where(and(eq(chatCheckpoints.sessionId, sessionId), eq(chatCheckpoints.checkpointCommit, checkpointCommit)))
+    .orderBy(desc(chatCheckpoints.createdAt))
     .limit(1);
   return result?.checkpoint;
 }
 
 export async function saveArtifact(input: {
-  workspaceId: string;
-  sessionId?: string;
+  sessionId: string;
   runId?: string;
   messageId?: string;
   name: string;

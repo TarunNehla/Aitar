@@ -2,7 +2,9 @@
 
 Cloud Agents is a browser-based coding agent.
 
-It keeps an ongoing chat connected to a persistent repository workspace.
+It keeps ongoing chats connected to repositories.
+
+Each chat owns an independent Git branch, checkout, and sandbox environment.
 
 Pi Agent Core runs the agent loop.
 
@@ -14,14 +16,15 @@ Docker isolates repository commands.
 
 ## V0 features
 
-- Persistent projects, workspaces, and chat sessions.
+- Persistent repositories and chat sessions.
 - Branching message history through parent message IDs.
 - Live assistant, tool, command, and file events through SSE.
 - Pi tools for listing, reading, searching, writing, commands, and Git diffs.
 - Docker CPU, memory, process, capability, network, and time limits.
 - User approval for network access and broad commands.
-- Internal Git checkpoint commits after file-changing tools.
-- Git patch artifacts at the end of every run.
+- One internal Git branch and local clone per chat.
+- Git checkpoint commits at the end of each run.
+- Diffs generated from Git on demand instead of stored patch artifacts.
 - Safe Postgres run claiming with `FOR UPDATE SKIP LOCKED`.
 - Run cancellation, token totals, model cost, and worker leases.
 
@@ -71,7 +74,7 @@ Production uses JSON output when `LOG_PRETTY=false`.
 
 Set `LOG_LEVEL` to `debug`, `info`, `warn`, or `error` to control verbosity.
 
-Logs include request IDs, run IDs, workspace IDs, tool names, timing, exit codes, token usage, and cost.
+Logs include request IDs, run IDs, chat IDs, repository IDs, tool names, timing, exit codes, token usage, and cost.
 
 Logs do not include prompts, complete commands, file contents, command output, API keys, cookies, or database URLs.
 
@@ -92,23 +95,33 @@ Run one active agent at a time with `MAX_ACTIVE_RUNS=1` for the cheapest V0 depl
 
 ## Checkpoint design
 
-Each workspace uses a local branch named `cloud-agent/<workspace-id>`.
+Each chat uses a local branch named `agent/<chat-id>`.
 
-After a file-changing tool, the worker stages every change.
+The host keeps one protected bare mirror under `repos/<repository-id>.git`.
+
+Each chat gets a separate local clone under `chats/<chat-id>/repository`.
+
+At the end of a run, the worker stages every non-ignored change.
 
 It creates an internal commit without running repository Git hooks.
 
 It stores the commit SHA and base SHA in Neon.
 
-It writes a binary Git patch into the workspace artifact directory.
+It pushes the resulting commit into `refs/cloud-agents/chats/<chat-id>` in the mirror.
 
-The internal branch is never pushed to GitHub.
+Neon stores only the base commit, checkpoint commit, and internal ref.
 
-Process and container crashes recover from the persistent workspace and Neon records.
+The UI requests a Git diff only when it needs to display code changes.
+
+File-read contents, search results, and command streams are not stored in Neon.
+
+Containers are disposable.
+
+Chat checkouts can be restored from the protected repository mirror.
 
 A complete host-disk loss is outside V0 recovery.
 
-Object storage can protect checkpoint patches in the next version.
+Object storage can back up Git bundles in a later version.
 
 ## Security boundaries
 

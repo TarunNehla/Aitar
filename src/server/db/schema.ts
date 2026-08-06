@@ -1,7 +1,6 @@
 import {
   bigint,
   bigserial,
-  boolean,
   doublePrecision,
   index,
   integer,
@@ -19,36 +18,27 @@ const timestamps = {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 };
 
-export const projects = pgTable("projects", {
+export const repositories = pgTable("repositories", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
   repositoryUrl: text("repository_url").notNull(),
+  defaultBranch: text("default_branch").notNull().default("main"),
+  lastFetchedAt: timestamp("last_fetched_at", { withTimezone: true }),
   ...timestamps,
 });
-
-export const workspaces = pgTable(
-  "workspaces",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
-    baseBranch: text("base_branch").notNull().default("main"),
-    baseCommit: text("base_commit"),
-    localPath: text("local_path").notNull(),
-    status: text("status").notNull().default("preparing"),
-    sandboxId: text("sandbox_id"),
-    lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
-    ...timestamps,
-  },
-  (table) => [index("workspaces_project_idx").on(table.projectId)],
-);
 
 export const chatSessions = pgTable(
   "chat_sessions",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    repositoryId: uuid("repository_id").notNull().references(() => repositories.id, { onDelete: "cascade" }),
     title: text("title").notNull().default("New session"),
+    baseBranch: text("base_branch").notNull().default("main"),
+    branchName: text("branch_name").notNull(),
+    baseCommit: text("base_commit"),
+    headCommit: text("head_commit"),
+    envStatus: text("env_status").notNull().default("preparing"),
+    lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
     provider: text("provider").notNull().default("openrouter"),
     defaultModel: text("default_model").notNull(),
     currentLeafMessageId: uuid("current_leaf_message_id"),
@@ -58,7 +48,10 @@ export const chatSessions = pgTable(
     nextEventSequence: bigint("next_event_sequence", { mode: "number" }).notNull().default(1),
     ...timestamps,
   },
-  (table) => [index("sessions_workspace_idx").on(table.workspaceId)],
+  (table) => [
+    index("sessions_repository_idx").on(table.repositoryId),
+    uniqueIndex("sessions_repository_branch_idx").on(table.repositoryId, table.branchName),
+  ],
 );
 
 export const messages = pgTable(
@@ -75,10 +68,7 @@ export const messages = pgTable(
     providerMessageId: text("provider_message_id"),
     ...timestamps,
   },
-  (table) => [
-    index("messages_session_idx").on(table.sessionId),
-    index("messages_parent_idx").on(table.parentMessageId),
-  ],
+  (table) => [index("messages_session_idx").on(table.sessionId), index("messages_parent_idx").on(table.parentMessageId)],
 );
 
 export const runs = pgTable(
@@ -86,7 +76,6 @@ export const runs = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
     userMessageId: uuid("user_message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("pending"),
     model: text("model").notNull(),
@@ -104,8 +93,8 @@ export const runs = pgTable(
   },
   (table) => [
     index("runs_claim_idx").on(table.status, table.createdAt),
-    uniqueIndex("runs_one_active_workspace_idx")
-      .on(table.workspaceId)
+    uniqueIndex("runs_one_active_session_idx")
+      .on(table.sessionId)
       .where(sql`${table.status} IN ('pending', 'running', 'waiting_for_approval', 'cancelling')`),
   ],
 );
@@ -122,9 +111,7 @@ export const messageBlocks = pgTable(
     visibility: text("visibility").notNull().default("both"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [
-    uniqueIndex("message_blocks_position_idx").on(table.messageId, table.position),
-  ],
+  (table) => [uniqueIndex("message_blocks_position_idx").on(table.messageId, table.position)],
 );
 
 export const events = pgTable(
@@ -138,10 +125,7 @@ export const events = pgTable(
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [
-    uniqueIndex("events_session_sequence_idx").on(table.sessionId, table.sequence),
-    index("events_run_idx").on(table.runId),
-  ],
+  (table) => [uniqueIndex("events_session_sequence_idx").on(table.sessionId, table.sequence), index("events_run_idx").on(table.runId)],
 );
 
 export const toolExecutions = pgTable(
@@ -165,8 +149,7 @@ export const artifacts = pgTable(
   "artifacts",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-    sessionId: uuid("session_id").references(() => chatSessions.id, { onDelete: "set null" }),
+    sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
     messageId: uuid("message_id").references(() => messages.id, { onDelete: "set null" }),
     name: text("name").notNull(),
@@ -177,7 +160,7 @@ export const artifacts = pgTable(
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("artifacts_workspace_idx").on(table.workspaceId)],
+  (table) => [index("artifacts_session_idx").on(table.sessionId)],
 );
 
 export const contextSnapshots = pgTable("context_snapshots", {
@@ -190,18 +173,18 @@ export const contextSnapshots = pgTable("context_snapshots", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const workspaceCheckpoints = pgTable(
-  "workspace_checkpoints",
+export const chatCheckpoints = pgTable(
+  "chat_checkpoints",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
     runId: uuid("run_id").references(() => runs.id, { onDelete: "set null" }),
     baseCommit: text("base_commit").notNull(),
     checkpointCommit: text("checkpoint_commit").notNull(),
     internalRef: text("internal_ref").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [index("checkpoints_workspace_idx").on(table.workspaceId, table.createdAt)],
+  (table) => [index("checkpoints_session_idx").on(table.sessionId, table.createdAt)],
 );
 
 export const approvalRequests = pgTable(
@@ -222,8 +205,7 @@ export const approvalRequests = pgTable(
 );
 
 export const schema = {
-  projects,
-  workspaces,
+  repositories,
   chatSessions,
   runs,
   messages,
@@ -232,6 +214,6 @@ export const schema = {
   toolExecutions,
   artifacts,
   contextSnapshots,
-  workspaceCheckpoints,
+  chatCheckpoints,
   approvalRequests,
 };
