@@ -12,7 +12,7 @@ OpenRouter provides the language model.
 
 OpenRouter requests prefer Baseten as the upstream inference provider.
 
-Neon Postgres stores sessions, messages, runs, tools, events, approvals, and checkpoints.
+Neon Postgres stores sessions, messages, runs, tools, events, checkpoints, and pull request metadata.
 
 Docker isolates repository commands.
 
@@ -21,9 +21,12 @@ Docker isolates repository commands.
 - Persistent repositories and chat sessions.
 - Branching message history through parent message IDs.
 - Live assistant, tool, command, and file events through SSE.
-- Pi tools for listing, reading, searching, writing, commands, and Git diffs.
-- Docker CPU, memory, process, capability, network, and time limits.
-- User approval for network access and broad commands.
+- A standard tool set built on the `@earendil-works/pi-coding-agent` factories: `read`, `edit`, `write`, `grep`, `find`, `ls`, `bash`.
+- `start_process`, `process_logs`, and `stop_process` for dev servers and watchers.
+- `create_pull_request`, the only path that pushes to GitHub, running entirely on the backend.
+- Every agent file operation and command runs inside the chat's container, with the repository at `/workspace`.
+- Docker CPU, memory, process, capability, disk, and time limits applied as invisible platform boundaries.
+- Outbound internet in containers by default. No chat permission prompts.
 - One internal Git branch and local clone per chat.
 - Git checkpoint commits at the end of each run.
 - Diffs generated from Git on demand instead of stored patch artifacts.
@@ -34,7 +37,7 @@ Docker isolates repository commands.
 
 - Node.js 22 or newer.
 - pnpm.
-- Docker.
+- Docker. The `SANDBOX_IMAGE` needs a POSIX shell, coreutils, GNU grep, and find. The default `node:22-bookworm` has all of them.
 - A Neon Postgres database.
 - An OpenRouter API key.
 
@@ -64,7 +67,7 @@ Set the value as `BETTER_AUTH_SECRET`.
 
 7. Add the GitHub App credentials described in [GitHub App](#github-app) if you need private repositories.
 
-8. Apply the database migration.
+8. Apply the database schema.
 
 ```sh
 pnpm db:migrate
@@ -167,12 +170,17 @@ Create the app under Settings, Developer settings, GitHub Apps.
 | Redirect on update | Enabled |
 | Webhook URL | `https://your-domain/api/github/webhook` |
 | Webhook secret | The value of `GITHUB_WEBHOOK_SECRET` |
-| Repository permission | Contents: Read-only |
+| Repository permission | Contents: Read and write |
+| Repository permission | Pull requests: Read and write |
 | Repository permission | Metadata: Read-only |
 | Account permission | Email addresses: Read-only |
 | Subscribed events | Installation, Installation repositories |
 
-Cloud Agents requests read-only contents because it never pushes to a remote. Add write access only when remote pushing ships.
+These three repository permissions are the complete set Cloud Agents uses. Contents write and pull requests write exist only so `create_pull_request` can push the chat branch and open its pull request. Nothing else is requested.
+
+Changing permissions on an existing GitHub App is a manual step: update the app under Settings, Developer settings, GitHub Apps, Permissions and events, then accept the new permissions on every existing installation. GitHub emails installation owners a review request, and the app keeps the old permissions on an installation until its owner approves. Token minting for a pull request fails with a clear error until that approval lands.
+
+Every token is minted per operation, scoped to the single repository, and requested with exactly the permissions that operation needs: read-only contents for fetching, and the write set above only for `create_pull_request`.
 
 Set `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET`. The private key may be pasted with literal `\n` escapes.
 
@@ -199,7 +207,7 @@ The token is never persisted, never placed in a remote URL or `.git/config`, nev
 
 ## Ownership
 
-Every repository has a required owner. Chats, runs, events, approvals, checkpoints, and artifacts inherit access through their repository.
+Every repository has a required owner. Chats, runs, events, checkpoints, pull requests, and artifacts inherit access through their repository.
 
 Requests without a session get `401`. Requests for another user's data get `403`. Authorisation is enforced in the backend queries, not in the frontend.
 
@@ -210,6 +218,31 @@ Validate the schema against a scratch schema at any time:
 ```sh
 pnpm db:validate
 ```
+
+## Pull requests
+
+`create_pull_request` is a backend tool. It never runs in Docker and the container never sees a GitHub token.
+
+The model supplies only a title, an optional body, and an optional draft flag. The backend derives the repository, installation, base branch, chat branch, checkout path, and checkpoint commit from the chat itself, so the model cannot target another repository or head branch.
+
+The tool verifies repository ownership, writes a final Git checkpoint, mints a short-lived installation token, pushes that exact checkpoint commit to the chat branch, and creates the pull request through the GitHub API. Calling it again returns the existing pull request instead of opening a second one.
+
+Neon stores only the number, URL, state, draft flag, title, both branch names, and the published commit.
+
+There is no generic push tool. The agent may run local Git through `bash`, but every authenticated push goes through this tool.
+
+## Development reset
+
+Testing state is disposable. The reset command clears this application's data and rebuilds the schema from the current definitions.
+
+```sh
+pnpm dev:reset:plan   # print the exact scope, change nothing
+pnpm dev:reset        # print the scope, then clear it
+```
+
+It prints the database host, database name, schema, and every table it will drop; each directory under `WORKSPACE_ROOT` it will remove; and every `cloud-agent-*` container it will delete. Only tables this application owns are dropped, and no other database, schema, or role is touched.
+
+The workspace root is verified before anything is deleted. The command refuses to run when it is empty, contains an unresolved variable, is not absolute, is the filesystem root, is the home directory, is fewer than two path segments deep, or is or contains the Cloud Agents source repository. It never runs with `NODE_ENV=production`.
 
 ## Logging
 
@@ -262,7 +295,9 @@ Neon stores only the base commit, checkpoint commit, and internal ref.
 
 The UI requests a Git diff only when it needs to display code changes.
 
-File-read contents, search results, and command streams are not stored in Neon.
+File contents, search results, command output, and process logs are never stored in Neon. Tool rows persist bounded summaries and metadata only: paths, line counts, byte counts, match counts, exit codes, and durations, with credentials redacted from command previews.
+
+Process logs stay inside the container and are streamed to the browser as transient events.
 
 Containers are disposable.
 
@@ -280,9 +315,9 @@ Repository URLs containing embedded credentials are rejected.
 
 Sandbox containers never receive session tokens, provider tokens, installation tokens, client secrets, the GitHub App private key, or the webhook secret.
 
-Sandbox containers run without Linux capabilities or network access by default.
+Sandbox containers run as a non-root user, with all Linux capabilities dropped, `no-new-privileges`, no Docker socket, no additional host mounts, and CPU, memory, PID, disk, and execution-time limits. Disk quotas apply only on Docker storage drivers that support them.
 
-Network commands run in a separate temporary container after user approval.
+Containers have outbound internet through the default bridge network. Host networking is never used. Commands, package installs, Git operations, and internet access never ask the user for permission; the limits above are invisible platform boundaries, not chat permissions.
 
 Docker with a bind mount is a useful V0 boundary, but it is not a hostile multi-tenant security boundary.
 

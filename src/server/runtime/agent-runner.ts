@@ -31,7 +31,28 @@ import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
 import { applyProviderRouting, configuredProviderPreferences } from "./openrouter-routing.js";
 import { workspaceManager } from "./workspace-manager.js";
-import { boundedTail, persistedToolSummary, safeToolArguments } from "./output-policy.js";
+import { persistedToolSummary, safeToolArguments } from "./output-policy.js";
+
+/** Tools whose calls are worth replaying after a reload, so they reach Postgres as summaries. */
+const durableTools = new Set(["bash", "write", "edit", "start_process", "stop_process", "create_pull_request"]);
+
+const systemPrompt = [
+  "You are a coding agent working inside an isolated container for one repository checkout.",
+  "The repository is always at /workspace and every tool runs there.",
+  "",
+  "Tools:",
+  "- read, ls, find, and grep inspect the checkout. Read a file before editing it.",
+  "- edit applies exact string replacements. write creates a file or replaces it completely.",
+  "- bash runs a shell command from /workspace. The container has outbound internet access, so installs and network requests work without asking.",
+  "- start_process, process_logs, and stop_process manage long-running commands such as dev servers. Never start those with bash.",
+  "- create_pull_request publishes this chat's branch and opens the pull request. It is the only way to push.",
+  "",
+  "Working rules:",
+  "- Make focused changes that satisfy the request, then verify them by running the project's tests or checks.",
+  "- Use git through bash for local inspection such as status, diff, and log. Do not configure remotes or credentials.",
+  "- Stop any process you started once you no longer need it.",
+  "- When the work is done, reply with a short summary of what changed instead of calling another tool.",
+].join("\n");
 
 const models = createModels();
 models.setProvider(openrouterProvider());
@@ -143,15 +164,6 @@ function assistantBlocks(message: AssistantMessage): Array<{
 }
 
 function toolBlocks(message: ToolResultMessage, toolArguments?: Record<string, unknown>) {
-  if (message.toolName === "finish") {
-    const text = message.content.map((block) => (block.type === "text" ? block.text : "[image]")).join("\n");
-    return [{
-      type: "tool_result",
-      text: boundedTail(text, 50_000).text,
-      data: { callId: message.toolCallId, toolName: message.toolName, isError: message.isError },
-      visibility: "both",
-    }];
-  }
   const summary = persistedToolSummary({
     toolName: message.toolName,
     isError: message.isError,
@@ -346,19 +358,12 @@ export class AgentWorker {
         repositoryPath,
         sessionId: run.session_id,
         runId: run.id,
-        baseCommit: runBaseCommit!,
         writer,
       });
 
       const agent = new Agent({
         initialState: {
-          systemPrompt: [
-            "You are a coding agent working inside an isolated repository workspace.",
-            "Inspect files before editing.",
-            "Make focused changes that satisfy the user request.",
-            "Run relevant tests before finishing.",
-            "Use the finish tool only when the request is complete.",
-          ].join("\n"),
+          systemPrompt,
           model: modelFor(run.model),
           thinkingLevel: "medium",
           tools,
@@ -497,7 +502,7 @@ export class AgentWorker {
         { runId: run.id, sessionId: run.session_id, toolCallId: event.toolCallId, toolName: event.toolName },
         "Agent tool started",
       );
-      const durable = ["run_command", "write_file"].includes(event.toolName);
+      const durable = durableTools.has(event.toolName);
       const safeArguments = safeToolArguments(event.toolName, event.args);
       input.toolArgumentsByCall.set(event.toolCallId, safeArguments);
       if (durable) await startToolExecution({
@@ -517,7 +522,7 @@ export class AgentWorker {
     }
 
     if (event.type === "tool_execution_end") {
-      const durable = ["run_command", "write_file"].includes(event.toolName);
+      const durable = durableTools.has(event.toolName);
       const summary = persistedToolSummary({
         toolName: event.toolName,
         isError: event.isError,

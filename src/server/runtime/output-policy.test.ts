@@ -1,66 +1,117 @@
 import { describe, expect, it } from "vitest";
-import { boundedTail, commandResultText, persistedToolSummary, safeToolArguments } from "./output-policy.js";
+import { persistedToolSummary, safeCommandPreview, safeToolArguments } from "./output-policy.js";
 
-describe("agent output persistence", () => {
-  it("keeps only the tail of large command output", () => {
-    const result = commandResultText({
-      stdout: `start-${"x".repeat(20_000)}-done`,
-      stderr: "",
-      stdoutBytes: 20_011,
-      stderrBytes: 0,
-      durationMs: 1_250,
-      exitCode: 0,
-    });
-    expect(result.truncated).toBe(true);
-    expect(result.text).not.toContain("start-");
-    expect(result.text).toContain("-done");
+const toolNames = [
+  "read",
+  "edit",
+  "write",
+  "grep",
+  "find",
+  "ls",
+  "bash",
+  "start_process",
+  "process_logs",
+  "stop_process",
+  "create_pull_request",
+];
+
+describe("persisted tool arguments", () => {
+  it("keeps file contents and patch text out of the database", () => {
+    expect(safeToolArguments("write", { path: "src/a.ts", content: "secret source" }))
+      .toEqual({ path: "src/a.ts", bytes: 13 });
+    expect(safeToolArguments("edit", {
+      path: "src/a.ts",
+      edits: [{ oldText: "secret before", newText: "secret after" }],
+    })).toEqual({ path: "src/a.ts", edits: 1 });
+    expect(safeToolArguments("read", { path: "src/a.ts", offset: 10, limit: 20 }))
+      .toEqual({ path: "src/a.ts", offset: 10, limit: 20 });
   });
 
-  it("persists useful tool metadata without file contents or command secrets", () => {
-    expect(safeToolArguments("write_file", { path: "src/a.ts", content: "secret source" }))
-      .toEqual({ path: "src/a.ts" });
-    expect(safeToolArguments("run_command", { command: "deploy --token secret", network: true }))
-      .toEqual({ command: "deploy --token [REDACTED]", network: true });
+  it("redacts credentials from commands", () => {
+    expect(safeToolArguments("bash", { command: "deploy --token secret" }))
+      .toEqual({ command: "deploy --token [REDACTED]" });
+    expect(safeToolArguments("start_process", { command: "API_KEY=abc123 pnpm dev", name: "dev-server" }))
+      .toEqual({ command: "API_KEY=[REDACTED] pnpm dev", name: "dev-server" });
+    expect(safeCommandPreview("git push https://ghp_abcdefghijklmnopqrstuvwx@github.com/a/b"))
+      .toContain("[REDACTED]");
+    expect(safeCommandPreview("curl -H 'Authorization: Bearer sk-live-123456'")).toContain("[REDACTED]");
+  });
 
-    const readSummary = persistedToolSummary({
-      toolName: "read_file",
+  it("never invents arguments for an unknown tool", () => {
+    expect(safeToolArguments("unknown_tool", { secret: "value" })).toEqual({});
+  });
+
+  it("keeps the pull request body out of the database", () => {
+    expect(safeToolArguments("create_pull_request", { title: "Add caching", body: "diff --git a b", draft: true }))
+      .toEqual({ title: "Add caching", draft: true });
+  });
+});
+
+describe("persisted tool summaries", () => {
+  it("summarises reads with counts instead of contents", () => {
+    const summary = persistedToolSummary({
+      toolName: "read",
       isError: false,
       arguments: { path: "src/a.ts" },
       details: { bytes: 2_048, lines: 42 },
     });
-    expect(readSummary.text).toContain("src/a.ts");
-    expect(readSummary.text).toContain("42 lines");
-    expect(readSummary.text).toBe("Read src/a.ts (42 lines, 2.0 KB).");
+    expect(summary.text).toBe("Read src/a.ts (42 lines, 2.0 KB). File contents were not stored.");
+    expect(summary.data).toEqual({ path: "src/a.ts", lines: 42, bytes: 2_048 });
   });
 
-  it("keeps search and command metadata in their summaries", () => {
-    const searchSummary = persistedToolSummary({
-      toolName: "search_files",
+  it("summarises searches, commands, processes, and pull requests", () => {
+    expect(persistedToolSummary({
+      toolName: "grep",
       isError: false,
-      arguments: { query: "TODO" },
-      details: { matches: 7 },
-    });
-    expect(searchSummary.data).toEqual({ query: "TODO", matches: 7 });
+      arguments: { pattern: "TODO" },
+      details: { matches: 7, files: 3, truncated: false },
+    }).data).toEqual({ pattern: "TODO", matches: 7, files: 3, truncated: false });
 
-    const commandSummary = persistedToolSummary({
-      toolName: "run_command",
+    const command = persistedToolSummary({
+      toolName: "bash",
       isError: false,
       arguments: { command: "pnpm test" },
-      details: { exitCode: 0, durationMs: 800, stdoutBytes: 12, stderrBytes: 0 },
+      details: { exitCode: 0, durationMs: 800, stdoutBytes: 12, stderrBytes: 0, truncated: false },
     });
-    expect(commandSummary.data.command).toBe("pnpm test");
+    expect(command.data.command).toBe("pnpm test");
+    expect(command.data.exitCode).toBe(0);
+    expect(command.text).toContain("Command output was not stored");
 
-    const listSummary = persistedToolSummary({
-      toolName: "list_files",
+    expect(persistedToolSummary({
+      toolName: "process_logs",
       isError: false,
-      details: { count: 2, files: ["src/a.ts", "src/b.ts"] },
-    });
-    expect(listSummary.data).toEqual({ count: 2, files: ["src/a.ts", "src/b.ts"] });
+      details: { name: "dev-server", processId: "abc", stdoutBytes: 900, stderrBytes: 0, state: "running" },
+    }).text).toContain("Log contents were not stored");
+
+    expect(persistedToolSummary({
+      toolName: "create_pull_request",
+      isError: false,
+      details: { number: 42, url: "https://github.com/a/b/pull/42", state: "open", draft: false, reused: false },
+    })).toMatchObject({ text: "Created pull request #42." });
   });
 
-  it("bounds generic text without losing its end", () => {
-    const result = boundedTail(`first-${"a".repeat(200)}-last`, 100);
-    expect(result.text).not.toContain("first-");
-    expect(result.text).toContain("-last");
+  it("summarises a cancelled command without an exit code", () => {
+    const summary = persistedToolSummary({
+      toolName: "bash",
+      isError: true,
+      arguments: { command: "sleep 600" },
+      details: { exitCode: null, durationMs: 1_000, stdoutBytes: 0, stderrBytes: 0, truncated: false },
+    });
+    expect(summary.text).toContain("Exit code unknown");
+    expect(summary.data.exitCode).toBeNull();
+  });
+
+  it("produces a summary for every tool without leaking payloads", () => {
+    const payload = "SUPER_SECRET_FILE_CONTENT";
+    for (const toolName of toolNames) {
+      const summary = persistedToolSummary({
+        toolName,
+        isError: false,
+        arguments: { content: payload, body: payload, oldText: payload },
+        details: { content: payload, output: payload, stdout: payload, logs: payload },
+      });
+      expect(summary.text, toolName).toBeTruthy();
+      expect(JSON.stringify(summary), toolName).not.toContain(payload);
+    }
   });
 });

@@ -157,7 +157,7 @@ export const runs = pgTable(
     index("runs_claim_idx").on(table.status, table.createdAt),
     uniqueIndex("runs_one_active_session_idx")
       .on(table.sessionId)
-      .where(sql`${table.status} IN ('pending', 'running', 'waiting_for_approval', 'cancelling')`),
+      .where(sql`${table.status} IN ('pending', 'running', 'cancelling')`),
   ],
 );
 
@@ -249,21 +249,24 @@ export const chatCheckpoints = pgTable(
   (table) => [index("checkpoints_session_idx").on(table.sessionId, table.createdAt)],
 );
 
-export const approvalRequests = pgTable(
-  "approval_requests",
+/** Only what the console needs to link back to GitHub. No tokens, titles of record, or diffs. */
+export const pullRequests = pgTable(
+  "pull_requests",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
-    runId: uuid("run_id").notNull().references(() => runs.id, { onDelete: "cascade" }),
-    toolExecutionId: uuid("tool_execution_id").references(() => toolExecutions.id, { onDelete: "cascade" }),
-    reason: text("reason").notNull(),
-    command: text("command"),
-    status: text("status").notNull().default("pending"),
-    resolvedBy: text("resolved_by"),
-    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    repositoryId: uuid("repository_id").notNull().references(() => repositories.id, { onDelete: "cascade" }),
+    number: integer("number").notNull(),
+    url: text("url").notNull(),
+    state: text("state").notNull().default("open"),
+    draft: boolean("draft").notNull().default(false),
+    title: text("title").notNull(),
+    headBranch: text("head_branch").notNull(),
+    baseBranch: text("base_branch").notNull(),
+    headCommit: text("head_commit").notNull(),
+    ...timestamps,
   },
-  (table) => [index("approvals_pending_idx").on(table.status, table.createdAt)],
+  (table) => [uniqueIndex("pull_requests_session_number_idx").on(table.sessionId, table.number)],
 );
 
 export const schema = {
@@ -280,5 +283,5 @@ export const schema = {
   artifacts,
   contextSnapshots,
   chatCheckpoints,
-  approvalRequests,
+  pullRequests,
 };

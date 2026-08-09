@@ -1,10 +1,12 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { CodeChanges, FileChangeStatus } from "../../shared/contracts.js";
 import { config } from "../config.js";
-import { errorForLog, logger } from "../logger.js";
+import { logger } from "../logger.js";
 import { baseGitEnvironment } from "./git-credentials.js";
-import { runChecked, runProcess, type ProcessResult } from "./process.js";
+import { runChecked } from "./process.js";
+import { sandbox } from "./sandbox.js";
+import { processManager } from "./sandbox-processes.js";
 
 const workspaceLogger = logger.child({ component: "workspace-manager" });
 const HOST_GIT_PREFIX = [
@@ -84,20 +86,6 @@ export function validateBranchName(value: string): string {
     throw new Error("Invalid Git branch name");
   }
   return value;
-}
-
-export function safeWorkspacePath(repositoryPath: string, requestedPath: string): string {
-  if (!requestedPath || requestedPath.includes("\0")) throw new Error("Invalid path");
-  const resolvedRepository = resolve(repositoryPath);
-  const resolvedPath = resolve(resolvedRepository, requestedPath);
-  if (resolvedPath !== resolvedRepository && !resolvedPath.startsWith(`${resolvedRepository}${sep}`)) {
-    throw new Error("Path escapes the workspace");
-  }
-  return resolvedPath;
-}
-
-function containerName(chatId: string): string {
-  return `cloud-agent-${chatId}`;
 }
 
 async function hostGit(args: string[], options: Parameters<typeof runChecked>[2] = {}) {
@@ -210,127 +198,10 @@ export class WorkspaceManager {
     return location;
   }
 
+  /** The container is the only place agent-requested file work happens. */
   async ensureSandbox(chatId: string, repositoryPath: string): Promise<string> {
     await this.ensurePlatformGitExcludes(repositoryPath);
-    const name = containerName(chatId);
-    const inspected = await runProcess("docker", ["inspect", "-f", "{{.State.Running}}", name], { timeoutMs: 10_000 });
-    if (inspected.exitCode === 0 && inspected.stdout.trim() === "true") return name;
-    if (inspected.exitCode === 0) {
-      await runChecked("docker", ["start", name], { timeoutMs: 30_000 });
-      return name;
-    }
-
-    await runChecked("docker", [
-      "run", "-d", "--name", name,
-      "--workdir", "/workspace",
-      "--mount", `type=bind,src=${repositoryPath},dst=/workspace`,
-      "--memory", `${config.SANDBOX_MEMORY_MB}m`,
-      "--cpus", String(config.SANDBOX_CPUS),
-      "--pids-limit", "256",
-      "--network", "none",
-      "--cap-drop", "ALL",
-      "--security-opt", "no-new-privileges:true",
-      config.SANDBOX_IMAGE,
-      "sleep", "infinity",
-    ], { timeoutMs: 120_000 });
-    return name;
-  }
-
-  async execute(
-    chatId: string,
-    repositoryPath: string,
-    command: string,
-    options: {
-      signal?: AbortSignal;
-      network?: boolean;
-      onStdout?: (chunk: string) => void;
-      onStderr?: (chunk: string) => void;
-      captureTail?: boolean;
-    } = {},
-  ): Promise<ProcessResult> {
-    const startedAt = Date.now();
-    const common = {
-      signal: options.signal,
-      timeoutMs: config.SANDBOX_TIMEOUT_SECONDS * 1_000,
-      onStdout: options.onStdout,
-      onStderr: options.onStderr,
-      captureTail: options.captureTail,
-    };
-
-    try {
-      const result = options.network
-        ? await runProcess("docker", [
-            "run", "--rm", "--workdir", "/workspace",
-            "--mount", `type=bind,src=${repositoryPath},dst=/workspace`,
-            "--memory", `${config.SANDBOX_MEMORY_MB}m`,
-            "--cpus", String(config.SANDBOX_CPUS),
-            "--pids-limit", "256",
-            "--cap-drop", "ALL",
-            "--security-opt", "no-new-privileges:true",
-            config.SANDBOX_IMAGE,
-            "sh", "-lc", command,
-          ], common)
-        : await runProcess(
-            "docker",
-            ["exec", await this.ensureSandbox(chatId, repositoryPath), "sh", "-lc", command],
-            common,
-          );
-      const data = {
-        chatId,
-        network: Boolean(options.network),
-        exitCode: result.exitCode,
-        durationMs: Date.now() - startedAt,
-        stdoutBytes: Buffer.byteLength(result.stdout),
-        stderrBytes: Buffer.byteLength(result.stderr),
-      };
-      if (result.exitCode === 0) workspaceLogger.info(data, "Sandbox command completed");
-      else workspaceLogger.warn(data, "Sandbox command failed");
-      return result;
-    } catch (error) {
-      workspaceLogger.error(
-        { error: errorForLog(error), chatId, network: Boolean(options.network), durationMs: Date.now() - startedAt },
-        "Sandbox command could not complete",
-      );
-      throw error;
-    }
-  }
-
-  async listFiles(repositoryPath: string, limit = 500): Promise<string[]> {
-    const result = await hostGit(["ls-files", "--cached", "--others", "--exclude-standard"], { cwd: repositoryPath });
-    return result.stdout.split("\n").filter(Boolean).slice(0, limit);
-  }
-
-  async readFile(repositoryPath: string, requestedPath: string): Promise<string> {
-    const path = safeWorkspacePath(repositoryPath, requestedPath);
-    const file = await stat(path);
-    if (file.size > 512 * 1024) throw new Error("File is larger than the V0 read limit");
-    return readFile(path, "utf8");
-  }
-
-  async writeFile(repositoryPath: string, requestedPath: string, content: string): Promise<void> {
-    const path = safeWorkspacePath(repositoryPath, requestedPath);
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content, "utf8");
-  }
-
-  async searchFiles(repositoryPath: string, query: string, limit = 200): Promise<string> {
-    const files = await this.listFiles(repositoryPath, 5_000);
-    const matches: string[] = [];
-    for (const file of files) {
-      if (matches.length >= limit) break;
-      let content: string;
-      try {
-        content = await this.readFile(repositoryPath, file);
-      } catch {
-        continue;
-      }
-      content.split("\n").forEach((line, index) => {
-        if (matches.length < limit && line.toLowerCase().includes(query.toLowerCase())) {
-          matches.push(`${file}:${index + 1}:${line}`);
-        }
-      });
-    }
-    return matches.join("\n");
+    return sandbox.ensureContainer(chatId, repositoryPath);
   }
 
   async checkpoint(input: {
@@ -440,7 +311,8 @@ export class WorkspaceManager {
     } catch (error) {
       if (error instanceof Error && error.message === "Chat checkout has uncheckpointed changes") throw error;
     }
-    await runProcess("docker", ["rm", "-f", containerName(input.chatId)], { timeoutMs: 30_000 });
+    await processManager.stopAll(input.chatId);
+    await sandbox.removeContainer(input.chatId);
     await rm(location.root, { recursive: true, force: true });
   }
 

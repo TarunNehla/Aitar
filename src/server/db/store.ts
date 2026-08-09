@@ -5,17 +5,19 @@ import { config } from "../config.js";
 import { eventHub } from "../events/event-hub.js";
 import { db, sql } from "./client.js";
 import {
-  approvalRequests,
   artifacts,
   chatCheckpoints,
   chatSessions,
   events,
   messageBlocks,
   messages,
+  pullRequests,
   repositories,
   runs,
   toolExecutions,
 } from "./schema.js";
+
+const activeRunStatuses = ["pending", "running", "cancelling"] as const;
 
 export type Access<T> =
   | { status: "ok"; value: T }
@@ -152,7 +154,7 @@ export async function claimIdleSessionForEviction(idleBefore: Date) {
           SELECT 1
           FROM runs
           WHERE runs.session_id = candidate.id
-            AND runs.status IN ('pending', 'running', 'waiting_for_approval', 'cancelling')
+            AND runs.status IN ('pending', 'running', 'cancelling')
         )
       ORDER BY candidate.last_active_at
       FOR UPDATE SKIP LOCKED
@@ -199,20 +201,6 @@ export async function getRunForUser(runId: string, userId: string): Promise<Acce
   return accessFor(row?.run, row?.repository.ownerUserId, userId);
 }
 
-export async function getApprovalForUser(
-  approvalId: string,
-  userId: string,
-): Promise<Access<typeof approvalRequests.$inferSelect>> {
-  const [row] = await db
-    .select({ approval: approvalRequests, repository: repositories })
-    .from(approvalRequests)
-    .innerJoin(chatSessions, eq(approvalRequests.sessionId, chatSessions.id))
-    .innerJoin(repositories, eq(chatSessions.repositoryId, repositories.id))
-    .where(eq(approvalRequests.id, approvalId))
-    .limit(1);
-  return accessFor(row?.approval, row?.repository.ownerUserId, userId);
-}
-
 export async function getArtifactForUser(
   artifactId: string,
   userId: string,
@@ -252,7 +240,7 @@ export async function createUserMessageAndRun(input: {
       .where(
         and(
           eq(runs.sessionId, session.id),
-          inArray(runs.status, ["pending", "running", "waiting_for_approval", "cancelling"]),
+          inArray(runs.status, [...activeRunStatuses]),
         ),
       )
       .limit(1);
@@ -306,7 +294,7 @@ export async function getActiveRunForSession(sessionId: string) {
     .where(
       and(
         eq(runs.sessionId, sessionId),
-        inArray(runs.status, ["pending", "running", "waiting_for_approval", "cancelling"]),
+        inArray(runs.status, [...activeRunStatuses]),
       ),
     )
     .orderBy(desc(runs.createdAt))
@@ -554,7 +542,7 @@ export async function recoverStaleRuns() {
   const interrupted = await db
     .select()
     .from(runs)
-    .where(inArray(runs.status, ["running", "waiting_for_approval", "cancelling"]));
+    .where(inArray(runs.status, ["running", "cancelling"]));
 
   for (const run of interrupted) {
     if (run.status === "cancelling") {
@@ -624,10 +612,6 @@ export async function recoverStaleRuns() {
       continue;
     }
 
-    await db
-      .update(approvalRequests)
-      .set({ status: "expired", resolvedAt: new Date(), resolvedBy: "worker_restart" })
-      .where(and(eq(approvalRequests.runId, run.id), eq(approvalRequests.status, "pending")));
     await db
       .update(toolExecutions)
       .set({ status: "failed", completedAt: new Date(), result: { error: "Worker restarted" } })
@@ -720,44 +704,6 @@ export async function finishToolExecution(input: {
     .where(and(eq(toolExecutions.runId, input.runId), eq(toolExecutions.callId, input.callId)));
 }
 
-export async function createApproval(input: {
-  sessionId: string;
-  runId: string;
-  toolExecutionId?: string;
-  reason: string;
-  command?: string;
-}) {
-  const [approval] = await db.insert(approvalRequests).values(input).returning();
-  await db.update(runs).set({ status: "waiting_for_approval", updatedAt: new Date() }).where(eq(runs.id, input.runId));
-  return approval;
-}
-
-export async function resolveApproval(id: string, approved: boolean) {
-  const [approval] = await db
-    .update(approvalRequests)
-    .set({
-      status: approved ? "approved" : "denied",
-      command: null,
-      resolvedBy: "user",
-      resolvedAt: new Date(),
-    })
-    .where(and(eq(approvalRequests.id, id), eq(approvalRequests.status, "pending")))
-    .returning();
-
-  if (approval) {
-    await db.update(runs).set({ status: "running", updatedAt: new Date() }).where(eq(runs.id, approval.runId));
-  }
-  return approval;
-}
-
-export async function getPendingApprovals(sessionId: string) {
-  return db
-    .select()
-    .from(approvalRequests)
-    .where(and(eq(approvalRequests.sessionId, sessionId), eq(approvalRequests.status, "pending")))
-    .orderBy(asc(approvalRequests.createdAt));
-}
-
 export async function saveCheckpoint(input: {
   sessionId: string;
   runId?: string;
@@ -787,6 +733,44 @@ export async function getCheckpointForSession(sessionId: string, checkpointCommi
     .orderBy(desc(chatCheckpoints.createdAt))
     .limit(1);
   return result?.checkpoint;
+}
+
+export async function savePullRequest(input: {
+  sessionId: string;
+  repositoryId: string;
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  title: string;
+  headBranch: string;
+  baseBranch: string;
+  headCommit: string;
+}) {
+  const [pullRequest] = await db
+    .insert(pullRequests)
+    .values(input)
+    .onConflictDoUpdate({
+      target: [pullRequests.sessionId, pullRequests.number],
+      set: {
+        url: input.url,
+        state: input.state,
+        draft: input.draft,
+        title: input.title,
+        headCommit: input.headCommit,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+  return pullRequest;
+}
+
+export async function listPullRequests(sessionId: string) {
+  return db
+    .select()
+    .from(pullRequests)
+    .where(eq(pullRequests.sessionId, sessionId))
+    .orderBy(desc(pullRequests.createdAt));
 }
 
 export async function saveArtifact(input: {

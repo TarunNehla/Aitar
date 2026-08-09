@@ -6,6 +6,7 @@ const processLogger = logger.child({ component: "process" });
 export interface ProcessResult {
   stdout: string;
   stderr: string;
+  stdoutBuffer?: Buffer;
   exitCode: number;
   stdoutBytes: number;
   stderrBytes: number;
@@ -19,11 +20,13 @@ export async function runProcess(
     cwd?: string;
     timeoutMs?: number;
     signal?: AbortSignal;
-    input?: string;
+    input?: string | Buffer;
     env?: NodeJS.ProcessEnv;
     onStdout?: (chunk: string) => void;
     onStderr?: (chunk: string) => void;
     captureTail?: boolean;
+    binary?: boolean;
+    maxCapturedBytes?: number;
   } = {},
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
@@ -41,7 +44,9 @@ export async function runProcess(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
-    const maxCapturedBytes = 512 * 1024;
+    const binaryChunks: Buffer[] = [];
+    let binaryBytes = 0;
+    const maxCapturedBytes = options.maxCapturedBytes ?? 512 * 1024;
     const capture = (current: string, chunk: string) => {
       if (!options.captureTail) return current.length < maxCapturedBytes ? current + chunk : current;
       const combined = current + chunk;
@@ -77,10 +82,17 @@ export async function runProcess(
     options.signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout!.on("data", (buffer: Buffer) => {
-      const chunk = buffer.toString();
       stdoutBytes += buffer.length;
-      stdout = capture(stdout, chunk);
-      options.onStdout?.(chunk);
+      if (options.binary) {
+        if (binaryBytes < maxCapturedBytes) {
+          binaryChunks.push(buffer);
+          binaryBytes += buffer.length;
+        }
+      } else {
+        const chunk = buffer.toString();
+        stdout = capture(stdout, chunk);
+        options.onStdout?.(chunk);
+      }
     });
 
     child.stderr!.on("data", (buffer: Buffer) => {
@@ -112,7 +124,15 @@ export async function runProcess(
         };
         if (exitCode === 0) processLogger.debug(data, "Process completed");
         else processLogger.debug(data, "Process exited with a non-zero status");
-        resolve({ stdout, stderr, exitCode, stdoutBytes, stderrBytes, durationMs });
+        resolve({
+          stdout,
+          stderr,
+          exitCode,
+          stdoutBytes,
+          stderrBytes,
+          durationMs,
+          ...(options.binary ? { stdoutBuffer: Buffer.concat(binaryChunks) } : {}),
+        });
       });
     });
 

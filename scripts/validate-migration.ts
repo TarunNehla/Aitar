@@ -18,7 +18,7 @@ const requiredTables = [
   "runs",
   "events",
   "chat_checkpoints",
-  "approval_requests",
+  "pull_requests",
   "artifacts",
 ];
 

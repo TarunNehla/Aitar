@@ -11,12 +11,15 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/server/db/migrate.ts",
-    "db:validate": "tsx scripts/validate-migration.ts"
+    "db:validate": "tsx scripts/validate-migration.ts",
+    "dev:reset": "tsx scripts/dev-reset.ts",
+    "dev:reset:plan": "tsx scripts/dev-reset.ts --dry-run"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "^1.6.26",
     "@earendil-works/pi-agent-core": "^0.83.0",
     "@earendil-works/pi-ai": "^0.83.0",
+    "@earendil-works/pi-coding-agent": "0.83.0",
     "@octokit/auth-app": "^8.3.0",
     "@octokit/rest": "^22.0.1",
     "@octokit/webhooks-methods": "^6.0.0",

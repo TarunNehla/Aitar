@@ -67,12 +67,11 @@ vi.mock("./db/store.js", () => ({
       : { status: "not_found" },
   getRunForUser: async (runId: string, userId: string) =>
     runId === ownedRun.id ? accessFor(ownedRun, ownedRepository.ownerUserId, userId) : { status: "not_found" },
-  getApprovalForUser: async () => ({ status: "not_found" }),
   listSessions: async (ownerUserId: string) =>
     ownerUserId === owner.id ? [{ session: ownedSession, repository: ownedRepository }] : [],
   getActiveBranchMessages: async () => [],
   listSessionRuns: async () => [],
-  getPendingApprovals: async () => [],
+  listPullRequests: async () => [],
   getActiveRunForSession: async () => undefined,
   listEvents: async () => [],
   createRepository: async () => ownedRepository,
@@ -85,7 +84,6 @@ vi.mock("./db/store.js", () => ({
   getCheckpointForSession: async () => undefined,
   getLatestCheckpointForSession: async () => undefined,
   markRunCancelling: async () => undefined,
-  resolveApproval: async () => undefined,
   updateRepositoryFetched: async () => undefined,
   updateSessionEnvironment: async () => ownedSession,
 }));

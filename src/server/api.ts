@@ -32,19 +32,17 @@ import {
   finishRun,
   getActiveBranchMessages,
   getActiveRunForSession,
-  getApprovalForUser,
   getCheckpointForSession,
   getLatestCheckpointForSession,
-  getPendingApprovals,
   getRepositoryForUser,
   getRunForUser,
   getSessionForUser,
   listEvents,
+  listPullRequests,
   listRepositories,
   listSessionRuns,
   listSessions,
   markRunCancelling,
-  resolveApproval,
   updateRepositoryFetched,
   updateSessionEnvironment,
   type Access,
@@ -53,7 +51,6 @@ import {
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
 import { activeRuns } from "./runtime/agent-runner.js";
-import { approvalBroker } from "./runtime/approval-broker.js";
 import { chatBranchName, validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
 
 const apiLogger = logger.child({ component: "api" });
@@ -408,12 +405,12 @@ export function createApi() {
       if (!relation) return;
 
       const sessionId = relation.session.id;
-      const [sessionMessages, sessionRuns, approvals] = await Promise.all([
+      const [sessionMessages, sessionRuns, pullRequests] = await Promise.all([
         getActiveBranchMessages(sessionId),
         listSessionRuns(sessionId),
-        getPendingApprovals(sessionId),
+        listPullRequests(sessionId),
       ]);
-      response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, approvals });
+      response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, pullRequests });
     }),
   );
 
@@ -554,24 +551,6 @@ export function createApi() {
       const cancelledLive = activeRuns.cancel(run.id);
       if (!cancelledLive) await finishRun({ runId: run.id, status: "cancelled" });
       response.json({ cancelled: true });
-    }),
-  );
-
-  app.post(
-    "/api/approvals/:approvalId",
-    asyncRoute(async (request, response) => {
-      const input = z.object({ approved: z.boolean() }).parse(request.body);
-      const access = await getApprovalForUser(routeParam(request, "approvalId"), authenticatedUser(request).id);
-      const owned = resolveAccess(access, response, "Pending approval not found");
-      if (!owned) return;
-
-      const approval = await resolveApproval(owned.id, input.approved);
-      if (!approval) {
-        response.status(404).json({ error: "Pending approval not found" });
-        return;
-      }
-      approvalBroker.resolve(approval.id, input.approved);
-      response.json({ approval });
     }),
   );
 

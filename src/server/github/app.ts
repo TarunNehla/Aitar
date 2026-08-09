@@ -48,6 +48,16 @@ export interface InstallationToken {
   expiresAt: string;
 }
 
+export interface GitHubPullRequest {
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  title: string;
+  headBranch: string;
+  baseBranch: string;
+}
+
 let appClient: Octokit | null = null;
 
 function applicationOctokit(): Octokit {
@@ -97,6 +107,21 @@ function toRepositorySummary(value: unknown): GitHubRepositorySummary {
     private: Boolean(data.private),
     defaultBranch: String(data.default_branch ?? "main"),
     cloneUrl: String(data.clone_url ?? ""),
+  };
+}
+
+function toPullRequest(value: unknown): GitHubPullRequest {
+  const data = record(value);
+  const head = record(data.head ?? {});
+  const base = record(data.base ?? {});
+  return {
+    number: Number(data.number),
+    url: String(data.html_url ?? ""),
+    state: String(data.state ?? "open"),
+    draft: Boolean(data.draft),
+    title: String(data.title ?? ""),
+    headBranch: String(head.ref ?? ""),
+    baseBranch: String(base.ref ?? ""),
   };
 }
 
@@ -153,6 +178,53 @@ export class GitHubAppClient {
       }
       throw error;
     }
+  }
+
+  async findPullRequest(input: {
+    installationToken: string;
+    owner: string;
+    repository: string;
+    headBranch: string;
+  }): Promise<GitHubPullRequest | null> {
+    const data = await this.request({
+      route: "GET /repos/{owner}/{repo}/pulls",
+      parameters: {
+        owner: input.owner,
+        repo: input.repository,
+        head: `${input.owner}:${input.headBranch}`,
+        state: "open",
+        per_page: 1,
+      },
+      installationToken: input.installationToken,
+    });
+    const pullRequests = Array.isArray(data) ? data : [];
+    return pullRequests.length > 0 ? toPullRequest(pullRequests[0]) : null;
+  }
+
+  async createPullRequest(input: {
+    installationToken: string;
+    owner: string;
+    repository: string;
+    title: string;
+    body?: string;
+    headBranch: string;
+    baseBranch: string;
+    draft?: boolean;
+  }): Promise<GitHubPullRequest> {
+    const data = await this.request({
+      route: "POST /repos/{owner}/{repo}/pulls",
+      parameters: {
+        owner: input.owner,
+        repo: input.repository,
+        title: input.title,
+        ...(input.body ? { body: input.body } : {}),
+        head: input.headBranch,
+        base: input.baseBranch,
+        draft: Boolean(input.draft),
+      },
+      installationToken: input.installationToken,
+    });
+    return toPullRequest(data);
   }
 
   async listInstallationRepositories(installationId: number): Promise<GitHubRepositorySummary[]> {

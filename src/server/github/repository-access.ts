@@ -10,8 +10,13 @@ import { GitHubInstallationUnavailableError, githubApp, type GitHubAppClient } f
 const accessLogger = logger.child({ component: "github-repository-access" });
 
 export const readOnlyContentsPermissions = { contents: "read", metadata: "read" } as const;
+export const pullRequestPermissions = {
+  contents: "write",
+  pull_requests: "write",
+  metadata: "read",
+} as const;
 
-async function installationForRepository(repository: RepositoryRow, userId: string) {
+export async function installationForRepository(repository: RepositoryRow, userId: string) {
   const [installation] = await db
     .select()
     .from(githubInstallations)
@@ -67,4 +72,38 @@ export async function withRepositoryGitAccess<T>(
   );
 
   return withInstallationCredentials(token, operation);
+}
+
+/**
+ * Short-lived write access for publishing a chat branch and opening its pull
+ * request. The token never leaves the backend and is never written to Git config.
+ */
+export async function withRepositoryPullRequestAccess<T>(
+  input: { repository: RepositoryRow; userId?: string | null; client?: GitHubAppClient },
+  operation: (access: { token: string; gitEnvironment: NodeJS.ProcessEnv }) => Promise<T>,
+): Promise<T> {
+  const userId = input.userId ?? input.repository.ownerUserId;
+  if (!input.repository.githubInstallationId || !userId) {
+    throw new Error("This repository is not connected to the Cloud Agents GitHub App");
+  }
+  if (!input.repository.githubFullName) {
+    throw new Error("This repository is missing its GitHub owner and name");
+  }
+
+  const installation = await installationForRepository(input.repository, userId);
+  const client = input.client ?? githubApp;
+  const { token } = await client.createInstallationToken({
+    installationId: installation.installationId,
+    githubRepositoryIds: input.repository.githubRepositoryId
+      ? [input.repository.githubRepositoryId]
+      : undefined,
+    permissions: { ...pullRequestPermissions },
+  });
+
+  accessLogger.info(
+    { repositoryId: input.repository.id, installationId: installation.installationId },
+    "GitHub installation token minted for a pull request",
+  );
+
+  return withInstallationCredentials(token, (gitEnvironment) => operation({ token, gitEnvironment }));
 }

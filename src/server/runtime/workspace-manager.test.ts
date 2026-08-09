@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { runChecked } from "./process.js";
-import { repositoryMirrorPath, safeWorkspacePath, validateRepositoryUrl, workspaceManager } from "./workspace-manager.js";
+import { repositoryMirrorPath, validateBranchName, validateRepositoryUrl, workspaceManager } from "./workspace-manager.js";
 
 const temporaryPaths: string[] = [];
 
@@ -12,9 +12,10 @@ afterEach(async () => {
 });
 
 describe("workspace path safety", () => {
-  it("keeps file paths inside the repository", () => {
-    expect(safeWorkspacePath("/tmp/repository", "src/index.ts")).toBe("/tmp/repository/src/index.ts");
-    expect(() => safeWorkspacePath("/tmp/repository", "../secret")).toThrow("escapes");
+  it("rejects branch names that could reach other refs", () => {
+    expect(validateBranchName("agent/session-1")).toBe("agent/session-1");
+    expect(() => validateBranchName("agent/../main")).toThrow("Invalid Git branch name");
+    expect(() => validateBranchName("--upload-pack=touch")).toThrow("Invalid Git branch name");
   });
 
   it("only accepts public GitHub-style URLs", () => {

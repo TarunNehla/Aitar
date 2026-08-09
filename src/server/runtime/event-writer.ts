@@ -1,11 +1,31 @@
 import { appendEvent } from "../db/store.js";
 import { eventHub } from "../events/event-hub.js";
 
+let transientSequence = 0;
+
+/** Live-only delivery: nothing here is replayable, so nothing here reaches Postgres. */
+export function publishTransient(
+  sessionId: string,
+  runId: string | null,
+  type: string,
+  payload: Record<string, unknown> = {},
+): void {
+  eventHub.publish({
+    id: `live-${Date.now()}-${transientSequence++}`,
+    sessionId,
+    runId,
+    sequence: 0,
+    type,
+    payload,
+    createdAt: new Date().toISOString(),
+    transient: true,
+  });
+}
+
 export class EventWriter {
   private queue = Promise.resolve();
   private pendingDelta: { type: string; key: string; value: string; payload: Record<string, unknown> } | null = null;
   private timer: NodeJS.Timeout | null = null;
-  private liveSequence = 0;
 
   constructor(
     private readonly sessionId: string,
@@ -21,16 +41,7 @@ export class EventWriter {
   }
 
   live(type: string, payload: Record<string, unknown> = {}): void {
-    eventHub.publish({
-      id: `live-${Date.now()}-${this.liveSequence++}`,
-      sessionId: this.sessionId,
-      runId: this.runId,
-      sequence: 0,
-      type,
-      payload,
-      createdAt: new Date().toISOString(),
-      transient: true,
-    });
+    publishTransient(this.sessionId, this.runId, type, payload);
   }
 
   delta(type: string, key: string, value: string, payload: Record<string, unknown> = {}): void {

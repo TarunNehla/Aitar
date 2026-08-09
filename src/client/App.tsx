@@ -42,10 +42,14 @@ interface Run {
   outputTokens: number;
 }
 
-interface Approval {
-  id: string;
-  reason: string;
-  command: string | null;
+interface PullRequestSummary {
+  number: number;
+  url: string;
+  state: string;
+  draft: boolean;
+  title: string;
+  headBranch: string;
+  baseBranch: string;
 }
 
 type TimelineItem =
@@ -62,7 +66,7 @@ type ThreadNode =
 interface SessionDetail extends SessionListItem {
   messages: MessageView[];
   runs: Run[];
-  approvals: Approval[];
+  pullRequests: PullRequestSummary[];
 }
 
 /** Rendered from client state only, so it never reaches the database. */
@@ -73,7 +77,7 @@ interface PendingMessage {
   messageId: string | null;
 }
 
-const activeStatuses = new Set(["pending", "running", "waiting_for_approval", "cancelling"]);
+const activeStatuses = new Set(["pending", "running", "cancelling"]);
 const liveOutputLimit = 100_000;
 const agentStatuses = [
   "Thinking…",
@@ -104,48 +108,75 @@ function formatBytes(value: unknown): string | null {
   return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
+function countLabel(value: unknown, singular: string, plural = `${singular}s`): string | null {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return null;
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
+/** One borderless line per tool call: a verb, an optional mono chip, a muted detail. */
 function toolPresentation(block: MessageView["blocks"][number] | undefined, failed: boolean) {
   const data = block?.data ?? {};
   const toolName = String(data.toolName ?? "tool");
-  const status = failed ? "Failed" : "Completed";
+  const status = failed ? "Failed" : "";
+  const joined = (parts: Array<string | null>) => parts.filter(Boolean).join(" · ") || status;
 
-  if (toolName === "read_file") {
-    const metadata = [
-      Number.isFinite(Number(data.lines)) ? `${Number(data.lines).toLocaleString()} lines` : null,
-      formatBytes(data.bytes),
-    ].filter(Boolean).join(" · ");
-    return { verb: "Read", code: String(data.path ?? "file"), detail: metadata || status };
-  }
-  if (toolName === "search_files") {
-    const matches = Number(data.matches);
+  if (toolName === "read") {
     return {
-      verb: "Searched",
-      code: String(data.query ?? "files"),
-      detail: Number.isFinite(matches) ? `${matches.toLocaleString()} matches` : status,
+      verb: "Read",
+      code: String(data.path ?? "file"),
+      detail: joined([countLabel(data.lines, "line"), formatBytes(data.bytes)]),
     };
   }
-  if (toolName === "list_files") {
-    const count = Number(data.count);
+  if (toolName === "edit") {
+    return { verb: "Edited", code: String(data.path ?? "file"), detail: joined([countLabel(data.edits, "edit")]) };
+  }
+  if (toolName === "write") {
+    return { verb: "Wrote", code: String(data.path ?? "file"), detail: joined([formatBytes(data.bytes)]) };
+  }
+  if (toolName === "grep") {
     return {
-      verb: "Listed files",
-      code: "",
-      detail: Number.isFinite(count) ? `${count.toLocaleString()} files` : status,
+      verb: "Searched for",
+      code: String(data.pattern ?? "pattern"),
+      detail: joined([countLabel(data.matches, "match", "matches"), countLabel(data.files, "file")]),
     };
   }
-  if (toolName === "run_command") {
+  if (toolName === "find") {
+    return {
+      verb: "Found files",
+      code: String(data.pattern ?? "pattern"),
+      detail: joined([countLabel(data.results, "result")]),
+    };
+  }
+  if (toolName === "ls") {
+    return { verb: "Listed", code: String(data.path ?? "."), detail: joined([countLabel(data.entries, "entry", "entries")]) };
+  }
+  if (toolName === "bash") {
     const durationMs = Number(data.durationMs);
-    const commandDetails = [
-      data.exitCode === undefined ? null : `exit ${String(data.exitCode)}`,
-      Number.isFinite(durationMs) ? `${(durationMs / 1_000).toFixed(1)}s` : null,
-    ].filter(Boolean).join(" · ");
     return {
       verb: failed ? "Command failed" : "Ran",
       code: String(data.command ?? "command"),
-      detail: commandDetails || status,
+      detail: joined([
+        data.exitCode === null || data.exitCode === undefined ? null : `exit ${String(data.exitCode)}`,
+        Number.isFinite(durationMs) ? `${(durationMs / 1_000).toFixed(1)}s` : null,
+      ]),
     };
   }
-  if (toolName === "write_file") {
-    return { verb: "Wrote", code: String(data.path ?? "file"), detail: status };
+  if (toolName === "start_process") {
+    return { verb: "Started", code: String(data.name ?? "process"), detail: status };
+  }
+  if (toolName === "process_logs") {
+    return {
+      verb: "Read process logs",
+      code: String(data.name ?? ""),
+      detail: joined([
+        formatBytes(data.stdoutBytes) ? `${formatBytes(data.stdoutBytes)} out` : null,
+        Number(data.stderrBytes) > 0 ? `${formatBytes(data.stderrBytes)} err` : null,
+      ]),
+    };
+  }
+  if (toolName === "stop_process") {
+    return { verb: "Stopped", code: String(data.name ?? "process"), detail: status };
   }
   return { verb: toolLabel(toolName), code: "", detail: status };
 }
@@ -248,8 +279,7 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "tool_started",
     "file_changed",
     "checkpoint_saved",
-    "approval_requested",
-    "approval_resolved",
+    "branch_published",
   ]);
 
   const timeline: TimelineItem[] = messages.map((message) => ({
@@ -355,6 +385,7 @@ function Console({
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [liveToolOutput, setLiveToolOutput] = useState<Record<string, string>>({});
+  const [processOutput, setProcessOutput] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -416,6 +447,7 @@ function Console({
     setEvents([]);
     setStreamingText("");
     setLiveToolOutput({});
+    setProcessOutput({});
     eventReplayReadyRef.current = false;
     latestSequenceRef.current = 0;
     shouldFollowMessagesRef.current = true;
@@ -439,6 +471,21 @@ function Console({
         }
         return;
       }
+      if (event.transient && event.type === "process_output") {
+        const processId = String(event.payload.processId ?? "");
+        const chunk = String(event.payload.chunk ?? "");
+        if (processId && chunk) {
+          setProcessOutput((current) => {
+            const combined = `${current[processId] ?? ""}${chunk}`;
+            return { ...current, [processId]: combined.slice(-liveOutputLimit) };
+          });
+        }
+        return;
+      }
+      if (event.transient && event.type === "process_exited") {
+        void loadDetail(selectedId, true);
+        return;
+      }
       latestSequenceRef.current = Math.max(latestSequenceRef.current, event.sequence);
       setEvents((current) => {
         if (current.some((candidate) => candidate.id === event.id)) return current;
@@ -456,8 +503,6 @@ function Console({
           "tool_completed",
           "run_completed",
           "run_failed",
-          "approval_requested",
-          "approval_resolved",
         ].includes(event.type)
       ) {
         if (event.type === "assistant_message_completed") setStreamingText("");
@@ -549,7 +594,7 @@ function Console({
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
-  }, [agentStatus, changesByCommit, detail, liveToolOutput, selectedId, streamingText, visiblePending]);
+  }, [agentStatus, changesByCommit, detail, liveToolOutput, processOutput, selectedId, streamingText, visiblePending]);
 
   const sessionsByRepository = useMemo(() => {
     const groups = new Map<string, { repository: Repository; sessions: SessionListItem[] }>();
@@ -567,6 +612,10 @@ function Console({
     [sessions, selectedId],
   );
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
+  const pullRequestsByNumber = useMemo(
+    () => Object.fromEntries((detail?.pullRequests ?? []).map((entry) => [entry.number, entry])),
+    [detail?.pullRequests],
+  );
 
   const openSession = useCallback(async (sessionId: string) => {
     await Promise.all([loadRepositories(), loadSessions()]);
@@ -777,7 +826,12 @@ function Console({
                     ))}
                   </StepGroup>
                 ) : node.item.kind === "message" ? (
-                  <Message key={node.item.id} message={node.item.message} />
+                  <Message
+                    key={node.item.id}
+                    message={node.item.message}
+                    pullRequests={pullRequestsByNumber}
+                    processOutput={processOutput}
+                  />
                 ) : (
                   <Fragment key={node.item.id}>
                     <TimelineEvent
@@ -811,20 +865,6 @@ function Console({
                   <span className="timeline-event-verb">{agentStatus}</span>
                 </div>
               )}
-
-              {detail.approvals.map((approval) => (
-                <ApprovalCard
-                  key={approval.id}
-                  approval={approval}
-                  onResolve={async (approved) => {
-                    await api(`/api/approvals/${approval.id}`, {
-                      method: "POST",
-                      body: JSON.stringify({ approved }),
-                    });
-                    await loadDetail(detail.session.id, true);
-                  }}
-                />
-              ))}
 
               {streamingText && (
                 <div className="message assistant-message streaming">
@@ -888,61 +928,68 @@ function Console({
   );
 }
 
-function Message({ message }: { message: MessageView }) {
+function Message({
+  message,
+  pullRequests,
+  processOutput,
+}: {
+  message: MessageView;
+  pullRequests?: Record<number, PullRequestSummary>;
+  processOutput?: Record<string, string>;
+}) {
   if (message.role === "tool") {
     const block = message.blocks[0];
-    if (block?.data.toolName === "finish") {
-      return (
-        <div className="message assistant-message">
-          <div className="message-body markdown-content">
-            <MarkdownText>{messageText(message)}</MarkdownText>
-          </div>
-        </div>
-      );
-    }
     const failed = Boolean(block?.data.isError);
-    const presentation = toolPresentation(block, failed);
     const toolName = String(block?.data.toolName ?? "tool");
-    const metadataClass = ["read_file", "run_command"].includes(toolName)
-      ? "timeline-event-detail tool-metadata"
-      : "timeline-event-detail";
 
-    if (toolName === "read_file") {
+    if (toolName === "create_pull_request" && !failed && block?.data.url) {
+      const number = Number(block.data.number);
+      const persisted = pullRequests?.[number];
       return (
-        <div className={`tool-result ${failed ? "failed" : ""}`}>
-          <span className="tool-icon">
-            <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
-          </span>
-          <span className="timeline-event-verb">{presentation.verb}</span>
-          {presentation.code && (
-            <span className="timeline-event-code" title={presentation.code}>{presentation.code}</span>
-          )}
-          <span className={metadataClass}>{presentation.detail}</span>
-        </div>
+        <PullRequestCard
+          url={String(block.data.url)}
+          number={number}
+          title={persisted?.title ?? String(block.data.title ?? "")}
+          state={persisted?.state ?? String(block.data.state ?? "open")}
+          draft={persisted?.draft ?? Boolean(block.data.draft)}
+          headBranch={persisted?.headBranch ?? String(block.data.headBranch ?? "")}
+          baseBranch={persisted?.baseBranch ?? String(block.data.baseBranch ?? "")}
+        />
       );
     }
 
-    const listedFiles = toolName === "list_files" && Array.isArray(block?.data.files)
-      ? block.data.files.map(String)
-      : [];
-    return (
-      <details className={`tool-message ${failed ? "failed" : ""}`}>
-        <summary>
-          <span className="chevron">
-            <Icon name="chevron-right" size={14} />
-          </span>
-          <span className="tool-icon">
-            <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
-          </span>
-          <span className="timeline-event-verb">{presentation.verb}</span>
-          {presentation.code && (
-            <span className="timeline-event-code" title={presentation.code}>{presentation.code}</span>
-          )}
-          <span className={metadataClass}>{presentation.detail}</span>
-        </summary>
-        <pre>{listedFiles.length > 0 ? listedFiles.join("\n") : messageText(message)}</pre>
-      </details>
+    const presentation = toolPresentation(block, failed);
+    const line = (
+      <>
+        <span className="tool-icon">
+          <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
+        </span>
+        <span className="timeline-event-verb">{presentation.verb}</span>
+        {presentation.code && (
+          <span className="timeline-event-code" title={presentation.code}>{presentation.code}</span>
+        )}
+        {presentation.detail && <span className="timeline-event-detail tool-metadata">{presentation.detail}</span>}
+      </>
     );
+
+    // Only a live process has anything left to expand; every other summary is the whole result.
+    const processId = toolName === "start_process" ? String(block?.data.processId ?? "") : "";
+    const output = processId ? processOutput?.[processId] : undefined;
+    if (output) {
+      return (
+        <details className="tool-message live-tool-output" open>
+          <summary>
+            <span className="chevron">
+              <Icon name="chevron-right" size={14} />
+            </span>
+            {line}
+          </summary>
+          <pre>{output}</pre>
+        </details>
+      );
+    }
+
+    return <div className={`tool-result ${failed ? "failed" : ""}`}>{line}</div>;
   }
 
   if (message.role === "user") {
@@ -960,6 +1007,50 @@ function Message({ message }: { message: MessageView }) {
         <MarkdownText>{messageText(message)}</MarkdownText>
       </div>
     </div>
+  );
+}
+
+/** The hand-off out of the product, so it is the one bordered card a thread earns. */
+function PullRequestCard({
+  url,
+  number,
+  title,
+  state,
+  draft,
+  headBranch,
+  baseBranch,
+}: {
+  url: string;
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  headBranch: string;
+  baseBranch: string;
+}) {
+  const tone = draft && state === "open" ? "draft" : state;
+  const label = draft && state === "open" ? "Draft" : sentenceCase(state);
+
+  return (
+    <a className="pull-request-card" href={url} target="_blank" rel="noreferrer">
+      <div className="pull-request-head">
+        <span className={`pull-request-state ${tone}`}>
+          <Icon name="git-pull-request" size={14} />
+          {label}
+        </span>
+        <span className="pull-request-number">#{number}</span>
+        <span className="spacer" />
+        <span className="external">
+          <Icon name="external-link" size={14} />
+        </span>
+      </div>
+      {title && <div className="pull-request-title">{title}</div>}
+      <div className="pull-request-branches">
+        <code>{headBranch}</code>
+        <Icon name="arrow-right" size={14} />
+        <code>{baseBranch}</code>
+      </div>
+    </a>
   );
 }
 
@@ -1110,15 +1201,10 @@ function TimelineEvent({
       (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
     );
     detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
-  } else if (event.type === "approval_requested") {
-    icon = "alert-triangle";
-    verb = "Waiting for approval";
-    detail = String(event.payload.reason ?? "");
-    tone = "warning";
-  } else if (event.type === "approval_resolved") {
-    icon = event.payload.approved ? "check" : "x";
-    verb = event.payload.approved ? "Approval granted" : "Approval denied";
-    tone = event.payload.approved ? "success" : "error";
+  } else if (event.type === "branch_published") {
+    icon = "git-branch";
+    verb = "Published branch";
+    code = String(event.payload.branch ?? "");
   }
 
   if (event.type === "tool_started" && liveOutput) {
@@ -1249,19 +1335,5 @@ function CodeChangesCard({ changes, sessionId, commit }: { changes: CodeChanges;
         })}
       </div>
     </section>
-  );
-}
-
-function ApprovalCard({ approval, onResolve }: { approval: Approval; onResolve: (approved: boolean) => Promise<void> }) {
-  return (
-    <div className="approval-card">
-      <p className="eyebrow">Approval needed</p>
-      <strong>{approval.reason}</strong>
-      {approval.command && <code>{approval.command}</code>}
-      <div className="approval-actions">
-        <button onClick={() => void onResolve(false)}>Deny</button>
-        <button className="approve" onClick={() => void onResolve(true)}>Allow once</button>
-      </div>
-    </div>
   );
 }

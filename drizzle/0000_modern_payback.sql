@@ -14,19 +14,6 @@ CREATE TABLE "accounts" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "approval_requests" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"session_id" uuid NOT NULL,
-	"run_id" uuid NOT NULL,
-	"tool_execution_id" uuid,
-	"reason" text NOT NULL,
-	"command" text,
-	"status" text DEFAULT 'pending' NOT NULL,
-	"resolved_by" text,
-	"resolved_at" timestamp with time zone,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE "artifacts" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"session_id" uuid NOT NULL,
@@ -148,6 +135,22 @@ CREATE TABLE "messages" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
+CREATE TABLE "pull_requests" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"session_id" uuid NOT NULL,
+	"repository_id" uuid NOT NULL,
+	"number" integer NOT NULL,
+	"url" text NOT NULL,
+	"state" text DEFAULT 'open' NOT NULL,
+	"draft" boolean DEFAULT false NOT NULL,
+	"title" text NOT NULL,
+	"head_branch" text NOT NULL,
+	"base_branch" text NOT NULL,
+	"head_commit" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "repositories" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"owner_user_id" text NOT NULL,
@@ -220,9 +223,6 @@ CREATE TABLE "verifications" (
 );
 --> statement-breakpoint
 ALTER TABLE "accounts" ADD CONSTRAINT "accounts_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "approval_requests" ADD CONSTRAINT "approval_requests_session_id_chat_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "approval_requests" ADD CONSTRAINT "approval_requests_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "approval_requests" ADD CONSTRAINT "approval_requests_tool_execution_id_tool_executions_id_fk" FOREIGN KEY ("tool_execution_id") REFERENCES "public"."tool_executions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_session_id_chat_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
@@ -238,13 +238,14 @@ ALTER TABLE "github_installation_users" ADD CONSTRAINT "github_installation_user
 ALTER TABLE "github_installation_users" ADD CONSTRAINT "github_installation_users_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "message_blocks" ADD CONSTRAINT "message_blocks_message_id_messages_id_fk" FOREIGN KEY ("message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "messages" ADD CONSTRAINT "messages_session_id_chat_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "pull_requests" ADD CONSTRAINT "pull_requests_session_id_chat_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "pull_requests" ADD CONSTRAINT "pull_requests_repository_id_repositories_id_fk" FOREIGN KEY ("repository_id") REFERENCES "public"."repositories"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "repositories" ADD CONSTRAINT "repositories_owner_user_id_users_id_fk" FOREIGN KEY ("owner_user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "repositories" ADD CONSTRAINT "repositories_github_installation_id_github_installations_id_fk" FOREIGN KEY ("github_installation_id") REFERENCES "public"."github_installations"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_session_id_chat_sessions_id_fk" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_user_message_id_messages_id_fk" FOREIGN KEY ("user_message_id") REFERENCES "public"."messages"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tool_executions" ADD CONSTRAINT "tool_executions_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "accounts_userId_idx" ON "accounts" USING btree ("user_id");--> statement-breakpoint
-CREATE INDEX "approvals_pending_idx" ON "approval_requests" USING btree ("status","created_at");--> statement-breakpoint
 CREATE INDEX "artifacts_session_idx" ON "artifacts" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "auth_sessions_userId_idx" ON "auth_sessions" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "checkpoints_session_idx" ON "chat_checkpoints" USING btree ("session_id","created_at");--> statement-breakpoint
@@ -259,10 +260,11 @@ CREATE INDEX "github_installations_account_idx" ON "github_installations" USING 
 CREATE UNIQUE INDEX "message_blocks_position_idx" ON "message_blocks" USING btree ("message_id","position");--> statement-breakpoint
 CREATE INDEX "messages_session_idx" ON "messages" USING btree ("session_id");--> statement-breakpoint
 CREATE INDEX "messages_parent_idx" ON "messages" USING btree ("parent_message_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "pull_requests_session_number_idx" ON "pull_requests" USING btree ("session_id","number");--> statement-breakpoint
 CREATE INDEX "repositories_owner_idx" ON "repositories" USING btree ("owner_user_id");--> statement-breakpoint
 CREATE INDEX "repositories_installation_idx" ON "repositories" USING btree ("github_installation_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "repositories_owner_github_repository_idx" ON "repositories" USING btree ("owner_user_id","github_repository_id") WHERE "repositories"."github_repository_id" IS NOT NULL;--> statement-breakpoint
 CREATE INDEX "runs_claim_idx" ON "runs" USING btree ("status","created_at");--> statement-breakpoint
-CREATE UNIQUE INDEX "runs_one_active_session_idx" ON "runs" USING btree ("session_id") WHERE "runs"."status" IN ('pending', 'running', 'waiting_for_approval', 'cancelling');--> statement-breakpoint
+CREATE UNIQUE INDEX "runs_one_active_session_idx" ON "runs" USING btree ("session_id") WHERE "runs"."status" IN ('pending', 'running', 'cancelling');--> statement-breakpoint
 CREATE UNIQUE INDEX "tools_run_call_idx" ON "tool_executions" USING btree ("run_id","call_id");--> statement-breakpoint
 CREATE INDEX "verifications_identifier_idx" ON "verifications" USING btree ("identifier");

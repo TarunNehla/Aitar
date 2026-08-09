@@ -661,49 +661,79 @@ button:disabled { cursor: not-allowed; }
 .diff-line.meta { color: var(--text-faint); font-style: italic; }
 .binary-change { padding: var(--space-8); color: var(--text-muted); font: var(--type-caption); }
 
-/* ── Approvals, toast ──────────────────────────────────────────────────── */
+/* ── Pull request card, toast ──────────────────────────────────────────── */
+/* The one bordered card a thread earns: it is the hand-off out of the product. */
 
-.approval-card {
+.pull-request-card {
   display: grid;
-  gap: var(--space-5);
+  gap: var(--space-6);
   padding: var(--space-7);
-  background: var(--state-review-bg);
-  border: 1px solid var(--amber-100);
-  border-radius: var(--radius-card);
-}
-.approval-card .eyebrow { margin: 0; color: var(--state-review-fg); }
-.approval-card strong { color: var(--text-strong); font: var(--type-ui); }
-.approval-card code {
-  max-height: 120px;
-  overflow: auto;
-  padding: var(--space-5);
-  color: var(--text-on-code);
-  background: var(--surface-code);
-  border-radius: var(--radius-md);
-  font: var(--type-code);
-  font-size: var(--text-xs);
-  white-space: pre-wrap;
-}
-.approval-actions { display: flex; justify-content: flex-end; gap: var(--space-4); }
-.approval-actions button {
-  height: 30px;
-  padding: 0 var(--space-6);
-  color: var(--text-strong);
   background: var(--surface-panel);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-control);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-card);
+  color: inherit;
+  text-decoration: none;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.pull-request-card:hover { box-shadow: var(--shadow-sm); text-decoration: none; }
+.pull-request-card:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.pull-request-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.pull-request-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-4);
+  color: var(--diff-add-fg);
+  background: var(--diff-add-bg);
+  border-radius: var(--radius-sm);
   font: var(--type-ui);
   font-size: var(--text-xs);
-  transition: var(--transition-control);
 }
-.approval-actions button:hover { background: var(--gray-25); border-color: var(--border-strong); }
-.approval-actions button.approve {
-  color: var(--text-inverse);
-  background: var(--action-primary);
-  border-color: var(--action-primary);
+.pull-request-state.draft { color: var(--text-muted); background: var(--gray-100); }
+.pull-request-state.merged { color: var(--state-merged-fg); background: var(--state-merged-bg); }
+.pull-request-state.closed { color: var(--red-500); background: var(--red-50); }
+.pull-request-number {
+  overflow: hidden;
+  color: var(--text-muted);
+  font: var(--type-code);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.approval-actions button.approve:hover { background: var(--action-primary-hover); border-color: var(--action-primary-hover); }
-.approval-actions button:active { transform: scale(0.985); }
+.pull-request-head .spacer { flex: 1; }
+.pull-request-head .external { display: grid; place-items: center; flex: none; color: var(--text-faint); }
+.pull-request-card:hover .external { color: var(--text-muted); }
+.pull-request-title {
+  color: var(--text-strong);
+  font: var(--type-ui);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+.pull-request-branches {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  flex-wrap: wrap;
+  color: var(--text-faint);
+}
+.pull-request-branches code {
+  max-width: 220px;
+  overflow: hidden;
+  padding: 2px var(--space-3);
+  color: var(--text-body);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-xs);
+  font: var(--type-code);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .toast {
   position: absolute;

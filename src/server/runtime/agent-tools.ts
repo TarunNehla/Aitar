@@ -1,24 +1,49 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import { approvalBroker } from "./approval-broker.js";
-import { inspectCommand } from "./command-policy.js";
-import type { EventWriter } from "./event-writer.js";
-import { workspaceManager } from "./workspace-manager.js";
-import { createApproval } from "../db/store.js";
+import {
+  createEditTool,
+  createFindTool,
+  createLsTool,
+  createReadTool,
+  createWriteTool,
+} from "@earendil-works/pi-coding-agent";
 import { logger } from "../logger.js";
-import { commandResultText } from "./output-policy.js";
+import type { EventWriter } from "./event-writer.js";
+import { createPullRequestForChat } from "./pull-request.js";
+import { effectiveTimeoutSeconds, platformTimeoutSeconds, runSandboxCommand } from "./sandbox-command.js";
+import { SandboxOperations } from "./sandbox-operations.js";
+import { processManager } from "./sandbox-processes.js";
+import { resolveWorkspacePath, WORKSPACE_PATH, workspaceRelativePath } from "./sandbox.js";
 
-interface ToolContext {
+export interface ToolContext {
   chatId: string;
   repositoryPath: string;
   sessionId: string;
   runId: string;
-  baseCommit: string;
   writer: EventWriter;
 }
 
-function textResult(text: string, details: Record<string, unknown> = {}) {
+type ToolResult = Awaited<ReturnType<AgentTool["execute"]>>;
+
+function textResult(text: string, details: Record<string, unknown> = {}): ToolResult {
   return { content: [{ type: "text" as const, text }], details };
+}
+
+function requestedPath(params: unknown): string {
+  const value = (params as { path?: unknown } | undefined)?.path;
+  return typeof value === "string" ? value : ".";
+}
+
+/** Adds the metadata the console and the event log need, without touching tool output. */
+function withDetails(tool: AgentTool, enrich: (params: any, result: ToolResult) => Record<string, unknown>): AgentTool {
+  return {
+    ...tool,
+    execute: async (callId, params, signal, onUpdate) => {
+      const result = await tool.execute(callId, params, signal, onUpdate);
+      const existing = result.details && typeof result.details === "object" ? result.details : {};
+      return { ...result, details: { ...existing, ...enrich(params, result) } };
+    },
+  };
 }
 
 export function createAgentTools(context: ToolContext): AgentTool[] {
@@ -28,165 +53,274 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     sessionId: context.sessionId,
     chatId: context.chatId,
   });
-  const listFiles: AgentTool = {
-    name: "list_files",
-    label: "List files",
-    description: "List repository files. Use this before guessing file paths.",
-    parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 1000 })),
+  const operations = new SandboxOperations(context.chatId, context.repositoryPath);
+
+  const read = withDetails(
+    createReadTool(WORKSPACE_PATH, { operations: operations.read, autoResizeImages: true }),
+    (params) => ({
+      path: workspaceRelativePath(resolveWorkspacePath(requestedPath(params))),
+      bytes: operations.lastRead?.bytes,
+      lines: operations.lastRead?.lines,
     }),
-    execute: async (_callId, params: any) => {
-      const files = await workspaceManager.listFiles(context.repositoryPath, Number(params.limit ?? 500));
-      return textResult(files.join("\n"), { count: files.length, files });
-    },
-  };
+  );
 
-  const readFile: AgentTool = {
-    name: "read_file",
-    label: "Read file",
-    description: "Read a UTF-8 text file from the repository.",
-    parameters: Type.Object({ path: Type.String({ minLength: 1 }) }),
-    execute: async (_callId, params: any) => {
-      const path = String(params.path);
-      const content = await workspaceManager.readFile(context.repositoryPath, path);
-      const bytes = Buffer.byteLength(content);
-      const lines = content.length === 0 ? 0 : content.split(/\r\n|\r|\n/).length;
-      toolLogger.debug({ path, bytes, lines }, "Repository file read");
-      return textResult(content, { path, bytes, lines });
+  const edit = withDetails(
+    createEditTool(WORKSPACE_PATH, { operations: operations.edit }),
+    (params) => {
+      const path = workspaceRelativePath(resolveWorkspacePath(requestedPath(params)));
+      const edits = Array.isArray(params?.edits) ? params.edits.length : 0;
+      context.writer.live("file_changed", { path, operation: "edit", edits });
+      return { path, edits, bytes: operations.lastWrite?.bytes };
     },
-  };
+  );
 
-  const searchFiles: AgentTool = {
-    name: "search_files",
-    label: "Search files",
-    description: "Search repository text and return matching file names, line numbers, and lines.",
-    parameters: Type.Object({
-      query: Type.String({ minLength: 1 }),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 500 })),
+  const write = withDetails(
+    createWriteTool(WORKSPACE_PATH, { operations: operations.write }),
+    (params) => {
+      const path = workspaceRelativePath(resolveWorkspacePath(requestedPath(params)));
+      const bytes = typeof params?.content === "string" ? Buffer.byteLength(params.content) : undefined;
+      context.writer.live("file_changed", { path, operation: "write", bytes });
+      return { path, bytes };
+    },
+  );
+
+  /** Counts the listed lines while ignoring the factories' notice and empty-result sentinels. */
+  const countedLines = (result: ToolResult, sentinels: string[]) =>
+    result.content
+      .map((block) => (block.type === "text" ? block.text : ""))
+      .join("\n")
+      .split("\n")
+      .filter((line) => line && !line.startsWith("[") && !sentinels.includes(line)).length;
+
+  const find = withDetails(
+    createFindTool(WORKSPACE_PATH, { operations: operations.find }),
+    (params, result) => ({
+      pattern: String(params?.pattern ?? ""),
+      path: workspaceRelativePath(resolveWorkspacePath(requestedPath(params))),
+      results: countedLines(result, ["No files found matching pattern"]),
     }),
-    execute: async (_callId, params: any) => {
-      const result = await workspaceManager.searchFiles(
-        context.repositoryPath,
-        String(params.query),
-        Number(params.limit ?? 200),
-      );
-      const matches = result.split("\n").filter(Boolean).length;
-      return textResult(result || "No matches found.", { query: String(params.query), matches });
-    },
-  };
+  );
 
-  const writeFile: AgentTool = {
-    name: "write_file",
-    label: "Write file",
-    description: "Create or replace a UTF-8 text file inside the repository.",
-    parameters: Type.Object({
-      path: Type.String({ minLength: 1 }),
-      content: Type.String(),
+  const list = withDetails(
+    createLsTool(WORKSPACE_PATH, { operations: operations.ls }),
+    (params, result) => ({
+      path: workspaceRelativePath(resolveWorkspacePath(requestedPath(params))),
+      entries: countedLines(result, ["(empty directory)"]),
     }),
-    executionMode: "sequential",
-    execute: async (_callId, params: any) => {
-      const path = String(params.path);
-      const content = String(params.content);
-      await workspaceManager.writeFile(context.repositoryPath, path, content);
-      toolLogger.info({ path, bytes: Buffer.byteLength(content) }, "Repository file written");
-      context.writer.live("file_changed", { path, operation: "write", bytes: Buffer.byteLength(content) });
-      return textResult(`Wrote ${path}.`, { path, bytes: Buffer.byteLength(content) });
-    },
-  };
+  );
 
-  const runCommand: AgentTool = {
-    name: "run_command",
-    label: "Run command",
+  const grep: AgentTool = {
+    name: "grep",
+    label: "grep",
     description:
-      "Run a shell command inside the Docker sandbox. Network is off unless network=true, which requires user approval.",
+      "Search file contents inside the workspace and return matching lines with paths and line numbers. " +
+      "Output is bounded, so narrow the search with path, glob, or limit when a pattern is broad.",
     parameters: Type.Object({
-      command: Type.String({ minLength: 1 }),
-      network: Type.Optional(Type.Boolean()),
+      pattern: Type.String({ minLength: 1, description: "Search pattern (regular expression, or literal when literal is true)" }),
+      path: Type.Optional(Type.String({ description: "File or directory to search, relative to the repository root" })),
+      glob: Type.Optional(Type.String({ description: "Only search files matching this glob, for example '*.ts'" })),
+      ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search" })),
+      literal: Type.Optional(Type.Boolean({ description: "Treat the pattern as a literal string" })),
+      context: Type.Optional(Type.Number({ minimum: 0, maximum: 20, description: "Lines of context around each match" })),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 1_000, description: "Maximum matches to return (default 100)" })),
+    }),
+    execute: async (_callId, params: any, signal) => {
+      const outcome = await operations.grep(
+        {
+          pattern: String(params.pattern),
+          path: params.path === undefined ? undefined : String(params.path),
+          glob: params.glob === undefined ? undefined : String(params.glob),
+          ignoreCase: Boolean(params.ignoreCase),
+          literal: Boolean(params.literal),
+          context: params.context === undefined ? undefined : Number(params.context),
+          limit: params.limit === undefined ? undefined : Number(params.limit),
+        },
+        signal,
+      );
+      return textResult(outcome.text, {
+        pattern: String(params.pattern),
+        matches: outcome.matches,
+        files: outcome.files,
+        truncated: outcome.truncated,
+      });
+    },
+  };
+
+  const bash: AgentTool = {
+    name: "bash",
+    label: "bash",
+    description:
+      `Run a shell command in the container for this chat, always from ${WORKSPACE_PATH}. ` +
+      "The container has outbound internet access, so package installs and network requests work. " +
+      `Commands are stopped after ${platformTimeoutSeconds()} seconds. Use start_process for anything long-lived.`,
+    parameters: Type.Object({
+      command: Type.String({ minLength: 1, description: "Shell command to run" }),
+      timeout: Type.Optional(
+        Type.Number({ minimum: 1, description: `Timeout in seconds, capped at ${platformTimeoutSeconds()}` }),
+      ),
     }),
     executionMode: "sequential",
-    execute: async (callId, params: any, signal, onUpdate) => {
+    execute: async (callId, params: any, signal) => {
       const command = String(params.command);
-      const network = Boolean(params.network);
-      const policy = inspectCommand(command, network);
-
-      if (!policy.allowed) throw new Error(policy.reason);
-
-      if (policy.approvalRequired) {
-        toolLogger.warn({ toolCallId: callId, network }, "Sandbox command approval requested");
-        const approval = await createApproval({
-          sessionId: context.sessionId,
-          runId: context.runId,
-          reason: policy.reason ?? "User approval is required",
-          command,
-        });
-        await context.writer.emit("approval_requested", {
-          approvalId: approval.id,
-          reason: approval.reason,
-        });
-        const approved = await approvalBroker.wait(approval.id, signal);
-        if (approved) toolLogger.info({ toolCallId: callId }, "Sandbox command approval granted");
-        else toolLogger.warn({ toolCallId: callId }, "Sandbox command approval denied");
-        await context.writer.emit("approval_resolved", { approvalId: approval.id, approved });
-        if (!approved) throw new Error("The user denied or did not answer the approval request");
-      }
-
-      const result = await workspaceManager.execute(context.chatId, context.repositoryPath, command, {
+      const outcome = await runSandboxCommand({
+        chatId: context.chatId,
+        repositoryPath: context.repositoryPath,
+        command,
+        timeout: params.timeout === undefined ? undefined : Number(params.timeout),
         signal,
-        network,
-        captureTail: true,
-        onStdout: (chunk) => {
-          context.writer.liveDelta("stdout_chunk", "chunk", chunk, { callId });
-          onUpdate?.(textResult(chunk, { stream: "stdout" }));
-        },
-        onStderr: (chunk) => {
-          context.writer.liveDelta("stderr_chunk", "chunk", chunk, { callId });
-          onUpdate?.(textResult(chunk, { stream: "stderr" }));
-        },
+        onStdout: (chunk) => context.writer.liveDelta("stdout_chunk", "chunk", chunk, { callId }),
+        onStderr: (chunk) => context.writer.liveDelta("stderr_chunk", "chunk", chunk, { callId }),
       });
       await context.writer.drain();
 
-      const output = commandResultText(result);
-      if (result.exitCode !== 0) {
-        throw new Error(output.text || `Command exited with code ${result.exitCode}`);
-      }
-      return textResult(output.text, {
+      const details = {
         command,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        stdoutBytes: result.stdoutBytes,
-        stderrBytes: result.stderrBytes,
-        outputTruncated: output.truncated,
+        exitCode: outcome.exitCode,
+        durationMs: outcome.durationMs,
+        stdoutBytes: outcome.stdoutBytes,
+        stderrBytes: outcome.stderrBytes,
+        truncated: outcome.truncated,
+      };
+
+      if (outcome.status === "aborted") throw new Error(`${outcome.text}\n\nCommand cancelled`.trim());
+      if (outcome.status === "timeout") {
+        throw new Error(
+          `${outcome.text}\n\nCommand timed out after ${effectiveTimeoutSeconds(params.timeout)} seconds`.trim(),
+        );
+      }
+      if (outcome.exitCode !== 0) {
+        throw new Error(`${outcome.text}\n\nCommand exited with code ${outcome.exitCode}`.trim());
+      }
+      return textResult(outcome.text || "(no output)", details);
+    },
+  };
+
+  const startProcess: AgentTool = {
+    name: "start_process",
+    label: "start process",
+    description:
+      "Start a long-running command, such as a dev server or a watcher, in the background inside this chat's container. " +
+      "Returns a processId for process_logs and stop_process.",
+    parameters: Type.Object({
+      command: Type.String({ minLength: 1, description: "Command to run in the background" }),
+      name: Type.Optional(Type.String({ minLength: 1, description: "Short label for this process" })),
+    }),
+    executionMode: "sequential",
+    execute: async (_callId, params: any) => {
+      const command = String(params.command);
+      const started = await processManager.start({
+        chatId: context.chatId,
+        repositoryPath: context.repositoryPath,
+        command,
+        name: params.name === undefined ? undefined : String(params.name),
+      });
+      toolLogger.info({ processId: started.processId, name: started.name }, "Managed process requested");
+      return textResult(
+        `Started ${started.name} as ${started.processId}. Read its output with process_logs.`,
+        { processId: started.processId, name: started.name, command },
+      );
+    },
+  };
+
+  const processLogs: AgentTool = {
+    name: "process_logs",
+    label: "process logs",
+    description:
+      "Read new output from a managed process. Pass the cursor from the previous call to continue where you stopped.",
+    parameters: Type.Object({
+      processId: Type.String({ minLength: 1, description: "Process id returned by start_process" }),
+      cursor: Type.Optional(Type.String({ description: "Cursor from the previous process_logs call" })),
+      limit: Type.Optional(Type.Number({ minimum: 512, description: "Maximum bytes to return per stream" })),
+    }),
+    execute: async (_callId, params: any) => {
+      const logs = await processManager.logs({
+        chatId: context.chatId,
+        processId: String(params.processId),
+        cursor: params.cursor === undefined ? undefined : String(params.cursor),
+        limit: params.limit === undefined ? undefined : Number(params.limit),
+      });
+      const sections = [
+        `status: ${logs.state}${logs.exitCode === null ? "" : ` (exit ${logs.exitCode})`}`,
+        logs.stdout ? `stdout:\n${logs.stdout}` : "stdout: (no new output)",
+        logs.stderr ? `stderr:\n${logs.stderr}` : "stderr: (no new output)",
+        `cursor: ${logs.nextCursor}${logs.truncated ? " (more output is waiting)" : ""}`,
+      ];
+      return textResult(sections.join("\n\n"), {
+        processId: logs.processId,
+        name: logs.name,
+        state: logs.state,
+        exitCode: logs.exitCode,
+        nextCursor: logs.nextCursor,
+        truncated: logs.truncated,
+        stdoutBytes: logs.stdoutBytes,
+        stderrBytes: logs.stderrBytes,
       });
     },
   };
 
-  const gitDiff: AgentTool = {
-    name: "git_diff",
-    label: "Git diff",
-    description: "Show all repository changes made since the workspace base commit.",
-    parameters: Type.Object({}),
-    execute: async () => {
-      const result = await workspaceManager.execute(
-        context.chatId,
-        context.repositoryPath,
-        `git diff --binary ${context.baseCommit}..HEAD && git diff --binary`,
-      );
-      if (result.exitCode !== 0) throw new Error(result.stderr || "Could not produce Git diff");
-      return textResult(result.stdout || "No changes.");
+  const stopProcess: AgentTool = {
+    name: "stop_process",
+    label: "stop process",
+    description: "Stop a managed process. Use force to send SIGKILL instead of SIGTERM.",
+    parameters: Type.Object({
+      processId: Type.String({ minLength: 1, description: "Process id returned by start_process" }),
+      force: Type.Optional(Type.Boolean({ description: "Kill the process immediately" })),
+    }),
+    executionMode: "sequential",
+    execute: async (_callId, params: any) => {
+      const stopped = await processManager.stop({
+        chatId: context.chatId,
+        processId: String(params.processId),
+        force: Boolean(params.force),
+      });
+      return textResult(`Stopped ${stopped.name}.`, {
+        processId: stopped.processId,
+        name: stopped.name,
+        state: stopped.state,
+        exitCode: stopped.exitCode,
+        force: Boolean(params.force),
+      });
     },
   };
 
-  const finish: AgentTool = {
-    name: "finish",
-    label: "Finish",
-    description: "Finish the current user request after work and verification are complete.",
-    parameters: Type.Object({ summary: Type.String({ minLength: 1 }) }),
-    executionMode: "sequential",
-    execute: async (_callId, params: any) => ({
-      ...textResult(String(params.summary)),
-      terminate: true,
+  const createPullRequest: AgentTool = {
+    name: "create_pull_request",
+    label: "create pull request",
+    description:
+      "Publish this chat's branch and open a pull request against the repository's base branch. " +
+      "The repository, branches, and commit are fixed by the platform. Calling this again returns the existing pull request.",
+    parameters: Type.Object({
+      title: Type.String({ minLength: 1, maxLength: 240, description: "Pull request title" }),
+      body: Type.Optional(Type.String({ maxLength: 60_000, description: "Pull request description in Markdown" })),
+      draft: Type.Optional(Type.Boolean({ description: "Open the pull request as a draft" })),
     }),
+    executionMode: "sequential",
+    execute: async (_callId, params: any) => {
+      const outcome = await createPullRequestForChat({
+        sessionId: context.sessionId,
+        runId: context.runId,
+        repositoryPath: context.repositoryPath,
+        title: String(params.title),
+        body: params.body === undefined ? undefined : String(params.body),
+        draft: Boolean(params.draft),
+        writer: context.writer,
+      });
+      const verb = outcome.reused ? "Reused existing pull request" : "Created pull request";
+      return textResult(
+        `${verb} #${outcome.number}: ${outcome.url} (${outcome.headBranch} into ${outcome.baseBranch}).`,
+        {
+          number: outcome.number,
+          url: outcome.url,
+          state: outcome.state,
+          draft: outcome.draft,
+          title: outcome.title,
+          headBranch: outcome.headBranch,
+          baseBranch: outcome.baseBranch,
+          reused: outcome.reused,
+        },
+      );
+    },
   };
 
-  return [listFiles, readFile, searchFiles, writeFile, runCommand, gitDiff, finish];
+  return [read, edit, write, grep, find, list, bash, startProcess, processLogs, stopProcess, createPullRequest];
 }
