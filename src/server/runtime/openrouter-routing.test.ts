@@ -24,17 +24,14 @@ describe("OpenRouter provider routing", () => {
     expect(providerPreferences([], true)).toBeNull();
   });
 
-  it("defaults to preferring Baseten with fallbacks allowed", () => {
-    expect(configuredProviderPreferences()).toEqual({ order: ["baseten"], allow_fallbacks: true });
+  it("configures no preference by default, leaving routing to OpenRouter", () => {
+    expect(configuredProviderPreferences()).toBeNull();
   });
 
-  it("adds provider preferences to the request body without dropping other fields", () => {
+  it("leaves the request body untouched when no provider is configured", () => {
     const payload = { model: "deepseek/deepseek-v4-flash-0731", messages: [{ role: "user", content: "hi" }] };
 
-    expect(applyProviderRouting(payload, openrouterModel)).toEqual({
-      ...payload,
-      provider: { order: ["baseten"], allow_fallbacks: true },
-    });
+    expect(applyProviderRouting(payload, openrouterModel)).toBeUndefined();
     expect(payload).not.toHaveProperty("provider");
   });
 

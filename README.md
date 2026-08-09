@@ -10,8 +10,6 @@ Pi Agent Core runs the agent loop.
 
 OpenRouter provides the language model.
 
-OpenRouter requests prefer Baseten as the upstream inference provider.
-
 Neon Postgres stores sessions, messages, runs, tools, events, checkpoints, and pull request metadata.
 
 Docker isolates repository commands.
@@ -85,24 +83,29 @@ Open `http://localhost:5173`.
 
 `OPENROUTER_MODEL` picks the model. OpenRouter then picks one of its upstream inference providers for that model.
 
-The provider table on an OpenRouter model page is informational. A provider is chosen only with the `provider` field on the request body, which the backend adds to every request.
+The provider table on an OpenRouter model page is informational. A provider is chosen only with the `provider` field on the request body, which the backend adds when `OPENROUTER_PROVIDERS` names one.
 
 | Variable | Meaning |
 | --- | --- |
-| `OPENROUTER_PROVIDERS` | Comma-separated provider slugs, most preferred first. Defaults to `baseten`. Empty accepts OpenRouter's own routing. |
+| `OPENROUTER_PROVIDERS` | Comma-separated provider slugs, most preferred first. Empty by default, which leaves routing to OpenRouter. |
 | `OPENROUTER_ALLOW_FALLBACKS` | `true` treats that list as a preference order and permits other providers. `false` pins requests to it and fails when none can serve the model. Defaults to `true`, matching OpenRouter. |
 
-The default prefers Baseten, so every request carries:
+By default no `provider` field is sent, so OpenRouter routes each request itself:
 
 ```json
 {
   "model": "deepseek/deepseek-v4-flash-0731",
-  "provider": { "order": ["baseten"], "allow_fallbacks": true },
   "messages": []
 }
 ```
 
-Set `OPENROUTER_ALLOW_FALLBACKS=false` to force Baseten and refuse every other provider:
+Set `OPENROUTER_PROVIDERS=baseten` to prefer one, so every request carries:
+
+```json
+"provider": { "order": ["baseten"], "allow_fallbacks": true }
+```
+
+Add `OPENROUTER_ALLOW_FALLBACKS=false` to force that provider and refuse every other:
 
 ```json
 "provider": { "only": ["baseten"], "allow_fallbacks": false }
