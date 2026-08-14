@@ -179,10 +179,23 @@ function toolPresentation(block: MessageView["blocks"][number] | undefined, fail
   if (toolName === "stop_process") {
     return { verb: "Stopped", code: String(data.name ?? "process"), detail: status };
   }
+  if (toolName === "inspect_image") {
+    return {
+      verb: failed ? "Could not inspect screenshot" : "Inspected screenshot",
+      code: "",
+      detail: joined([visionDetail(data), formatBytes(data.bytes)]),
+    };
+  }
   if (toolName.startsWith("browser_")) {
     return browserPresentation(toolName, data, failed, joined, status);
   }
   return { verb: toolLabel(toolName), code: "", detail: status };
+}
+
+function visionDetail(data: Record<string, unknown>): string | null {
+  if (data.routing !== "delegated") return null;
+  const model = String(data.visionModel ?? "").trim();
+  return model ? `Vision analysis completed · ${model}` : "Vision analysis completed";
 }
 
 function quoted(value: unknown, fallback: string): string {
@@ -257,7 +270,7 @@ function browserPresentation(
     return {
       verb: failed ? "Could not capture screenshot" : "Captured screenshot",
       code: "",
-      detail: joined([dimensions(data), formatBytes(data.bytes)]),
+      detail: joined([dimensions(data), formatBytes(data.bytes), visionDetail(data)]),
     };
   }
   if (toolName === "browser_console") {
@@ -285,6 +298,7 @@ const browserIcons: Record<string, IconName> = {
   browser_screenshot: "camera",
   browser_console: "terminal",
   browser_close: "x",
+  inspect_image: "search",
 };
 
 function toolIcon(toolName: string): IconName {
@@ -390,6 +404,7 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "file_changed",
     "checkpoint_saved",
     "branch_published",
+    "vision_capability_fallback",
   ]);
 
   const timeline: TimelineItem[] = messages.map((message) => ({
@@ -1132,7 +1147,8 @@ function Message({
       );
     }
 
-    const artifactId = toolName === "browser_screenshot" ? String(block?.data.artifactId ?? "") : "";
+    const showsArtifact = toolName === "browser_screenshot" || toolName === "inspect_image";
+    const artifactId = showsArtifact ? String(block?.data.artifactId ?? "") : "";
     if (artifactId && !failed) {
       return (
         <div className="tool-screenshot">

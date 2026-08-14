@@ -22,6 +22,7 @@ const toolNames = [
   "browser_scroll",
   "browser_wait",
   "browser_screenshot",
+  "inspect_image",
   "browser_console",
   "browser_close",
 ];
@@ -124,5 +125,109 @@ describe("persisted tool summaries", () => {
       expect(summary.text, toolName).toBeTruthy();
       expect(JSON.stringify(summary), toolName).not.toContain(payload);
     }
+  });
+
+  it("keeps image bytes and prompts out of a screenshot summary while persisting routing metadata", () => {
+    const summary = persistedToolSummary({
+      toolName: "browser_screenshot",
+      isError: false,
+      arguments: { fullPage: true, question: "Is the heading centred?" },
+      details: {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1_280,
+        height: 800,
+        bytes: 188_416,
+        fullPage: true,
+        truncated: false,
+        question: "Is the heading centred?",
+        primaryModel: "deepseek/deepseek-v4-flash-0731",
+        routing: "delegated",
+        structured: true,
+        visionModel: "google/gemini-3.7-flash",
+        visionInputTokens: 1_100,
+        visionOutputTokens: 240,
+        visionCostUsd: 0.0009,
+        visionDurationMs: 2_400,
+        confidence: 0.82,
+        visualProblems: 1,
+        visionSummary: "The heading is centred and no text overflows.",
+        base64: "SU1BR0VCWVRFUw==",
+        image: "SU1BR0VCWVRFUw==",
+      },
+    });
+
+    expect(JSON.stringify(summary)).not.toContain("SU1BR0VCWVRFUw==");
+    expect(summary.text).toContain("Inspected by google/gemini-3.7-flash");
+    expect(summary.data).toEqual({
+      artifactId: "artifact-1",
+      url: "http://localhost:3000/",
+      width: 1_280,
+      height: 800,
+      bytes: 188_416,
+      fullPage: true,
+      truncated: false,
+      question: "Is the heading centred?",
+      primaryModel: "deepseek/deepseek-v4-flash-0731",
+      routing: "delegated",
+      structured: true,
+      visionModel: "google/gemini-3.7-flash",
+      visionInputTokens: 1_100,
+      visionOutputTokens: 240,
+      visionCostUsd: 0.0009,
+      visionDurationMs: 2_400,
+      confidence: 0.82,
+      visualProblems: 1,
+      visionSummary: "The heading is centred and no text overflows.",
+    });
+  });
+
+  it("records a direct screenshot without inventing a vision model", () => {
+    const summary = persistedToolSummary({
+      toolName: "browser_screenshot",
+      isError: false,
+      arguments: { fullPage: false },
+      details: { artifactId: "artifact-1", routing: "direct", structured: false, visionDurationMs: 1 },
+    });
+    expect(summary.text).toContain("read the image directly");
+    expect(summary.data.visionModel).toBeUndefined();
+    expect(summary.data.visionCostUsd).toBeUndefined();
+  });
+
+  it("bounds the question and the visual summary it persists", () => {
+    const summary = persistedToolSummary({
+      toolName: "inspect_image",
+      isError: false,
+      arguments: { artifactId: "artifact-1", question: "q".repeat(2_000) },
+      details: {
+        artifactId: "artifact-1",
+        mimeType: "image/png",
+        bytes: 1_024,
+        routing: "delegated",
+        visionModel: "google/gemini-3.7-flash",
+        visionSummary: "s".repeat(4_000),
+      },
+    });
+
+    expect(String(summary.data.question).length).toBeLessThanOrEqual(400);
+    expect(String(summary.data.visionSummary).length).toBeLessThanOrEqual(600);
+    expect(summary.text).toContain("Inspected screenshot artifact-1");
+    expect(summary.text).toContain("The image and the question were not stored.");
+  });
+
+  it("keeps the artifact id and the question but nothing else from inspect_image arguments", () => {
+    expect(
+      safeToolArguments("inspect_image", {
+        artifactId: "artifact-1",
+        question: "Do the cards line up?",
+        image: "SU1BR0VCWVRFUw==",
+      }),
+    ).toEqual({ artifactId: "artifact-1", question: "Do the cards line up?" });
+  });
+
+  it("keeps the screenshot question but nothing else from screenshot arguments", () => {
+    expect(safeToolArguments("browser_screenshot", { fullPage: true, question: "Any overflow?", secret: "nope" }))
+      .toEqual({ fullPage: true, question: "Any overflow?" });
+    expect(safeToolArguments("browser_screenshot", { fullPage: false })).toEqual({ fullPage: false });
   });
 });

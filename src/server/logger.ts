@@ -30,6 +30,12 @@ const secretKeys = [
   "GITHUB_CLIENT_SECRET",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",
+  "base64",
+  "imageBase64",
+  "imageData",
+  "screenshotBase64",
+  "visionPrompt",
+  "visionResponse",
 ];
 
 const redactPaths = [

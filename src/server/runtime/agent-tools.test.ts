@@ -115,6 +115,20 @@ function tools(chatId = "chat-1") {
     sessionId: "session-1",
     runId: "run-1",
     writer: writer as never,
+    vision: {
+      primaryModelId: "primary/model",
+      supportsImages: () => false,
+      wasDemoted: () => false,
+      demoteToTextOnly: () => false,
+      recordDirectDelivery: () => undefined,
+      takeDirectDeliveries: () => [],
+      inspect: async () => ({
+        decision: "disabled" as const,
+        text: "Visual analysis is turned off for this deployment.",
+        structured: false,
+        durationMs: 0,
+      }),
+    } as never,
   });
 }
 
@@ -175,6 +189,7 @@ describe("agent tool schemas", () => {
       "browser_scroll",
       "browser_wait",
       "browser_screenshot",
+      "inspect_image",
       "browser_console",
       "browser_close",
     ]);

@@ -319,6 +319,135 @@ describe("tool rendering", () => {
     expect(document.querySelectorAll("details.tool-message")).toHaveLength(0);
   });
 
+  it("keeps showing the screenshot when a vision model described it", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_screenshot", {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1280,
+        height: 800,
+        bytes: 188_416,
+        question: "Is the heading centred?",
+        routing: "delegated",
+        visionModel: "google/gemini-3.7-flash",
+        primaryModel: "deepseek/deepseek-v4-flash-0731",
+        confidence: 0.86,
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Captured screenshot")).toBeDefined());
+    const image = document.querySelector(".screenshot-thumb img") as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe("/api/sessions/session-1/artifacts/artifact-1");
+    expect(document.querySelectorAll("details.tool-message")).toHaveLength(0);
+  });
+
+  it("shows the inspecting model only as muted technical detail", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_screenshot", {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1280,
+        height: 800,
+        bytes: 188_416,
+        routing: "delegated",
+        visionModel: "google/gemini-3.7-flash",
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Captured screenshot")).toBeDefined());
+    const muted = document.querySelector(".timeline-event-detail.tool-metadata");
+    expect(muted?.textContent).toContain("Vision analysis completed · google/gemini-3.7-flash");
+    expect(document.querySelector(".timeline-event-verb")?.textContent).toBe("Captured screenshot");
+  });
+
+  it("names no vision model when the run's own model read the image", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_screenshot", {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1280,
+        height: 800,
+        bytes: 188_416,
+        routing: "direct",
+        primaryModel: "google/gemini-3.7-flash",
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Captured screenshot")).toBeDefined());
+    expect(screen.getByText("1280 × 800 · 184.0 KB")).toBeDefined();
+    expect(document.body.textContent).not.toContain("Vision analysis completed");
+  });
+
+  it("renders an image inspection as its own activity row with the screenshot", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "inspect_image", {
+        artifactId: "artifact-1",
+        bytes: 188_416,
+        mimeType: "image/png",
+        question: "Do the two cards have equal padding?",
+        routing: "delegated",
+        visionModel: "google/gemini-3.7-flash",
+        confidence: 0.7,
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Inspected screenshot")).toBeDefined());
+    const muted = document.querySelector(".timeline-event-detail.tool-metadata");
+    expect(muted?.textContent).toContain("Vision analysis completed · google/gemini-3.7-flash");
+
+    const image = document.querySelector(".screenshot-thumb img") as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe("/api/sessions/session-1/artifacts/artifact-1");
+    expect(document.querySelectorAll("details.tool-message")).toHaveLength(0);
+    expect(document.querySelectorAll(".browser-panel, .activity-panel, [data-browser-panel]")).toHaveLength(0);
+  });
+
+  it("never renders image bytes or a local path from a screenshot row", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_screenshot", {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1280,
+        height: 800,
+        bytes: 188_416,
+        routing: "delegated",
+        visionModel: "google/gemini-3.7-flash",
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Captured screenshot")).toBeDefined());
+    expect(document.body.innerHTML).not.toContain("base64");
+    expect(document.body.innerHTML).not.toContain("/Users");
+    expect(document.body.innerHTML).not.toContain(".cloud-agent/artifacts");
+  });
+
+  it("shows a failed inspection as a failed row", async () => {
+    sessionMessages = [
+      {
+        ...toolMessage("call-1", "inspect_image", { artifactId: "artifact-1" }),
+        blocks: [
+          {
+            id: "block-call-1",
+            position: 0,
+            type: "tool_result",
+            text: "summary",
+            data: { callId: "call-1", toolName: "inspect_image", isError: true, artifactId: "artifact-1" },
+            visibility: "model",
+          },
+        ],
+      },
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Could not inspect screenshot")).toBeDefined());
+    expect(document.querySelectorAll(".tool-result.failed")).toHaveLength(1);
+    expect(document.querySelectorAll(".screenshot-thumb")).toHaveLength(0);
+  });
+
   it("shows a browser failure as a failed row", async () => {
     sessionMessages = [
       {

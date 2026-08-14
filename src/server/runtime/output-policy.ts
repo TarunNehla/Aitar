@@ -3,6 +3,8 @@ const PATTERN_PREVIEW_LIMIT = 200;
 const URL_PREVIEW_LIMIT = 300;
 const REFERENCE_PREVIEW_LIMIT = 60;
 const ELEMENT_LABEL_LIMIT = 120;
+const QUESTION_PREVIEW_LIMIT = 400;
+const VISION_SUMMARY_LIMIT = 600;
 
 function metadataPreview(value: unknown, maximumCharacters = METADATA_PREVIEW_LIMIT): string {
   const text = String(value ?? "").trim();
@@ -26,6 +28,44 @@ function byteLabel(value: unknown): string | null {
 function measurements(parts: Array<string | null>): string {
   const joined = parts.filter(Boolean).join(", ");
   return joined ? ` (${joined})` : "";
+}
+
+function visionData(details: Record<string, unknown>): Record<string, unknown> {
+  const routing = metadataPreview(details.routing, 24);
+  const primaryModel = metadataPreview(details.primaryModel, 120);
+  const visionModel = metadataPreview(details.visionModel, 120);
+  const inputTokens = optionalNumber(details.visionInputTokens);
+  const outputTokens = optionalNumber(details.visionOutputTokens);
+  const costUsd = optionalNumber(details.visionCostUsd);
+  const visionDurationMs = optionalNumber(details.visionDurationMs);
+  const confidence = optionalNumber(details.confidence);
+  const visualProblems = optionalNumber(details.visualProblems);
+  return {
+    ...(routing ? { routing } : {}),
+    ...(primaryModel ? { primaryModel } : {}),
+    ...(visionModel ? { visionModel } : {}),
+    ...(inputTokens === undefined ? {} : { visionInputTokens: inputTokens }),
+    ...(outputTokens === undefined ? {} : { visionOutputTokens: outputTokens }),
+    ...(costUsd === undefined ? {} : { visionCostUsd: costUsd }),
+    ...(visionDurationMs === undefined ? {} : { visionDurationMs }),
+    ...(confidence === undefined ? {} : { confidence }),
+    ...(visualProblems === undefined ? {} : { visualProblems }),
+    ...(details.structured === undefined ? {} : { structured: Boolean(details.structured) }),
+    ...(details.visionSummary === undefined
+      ? {}
+      : { visionSummary: metadataPreview(details.visionSummary, VISION_SUMMARY_LIMIT) }),
+  };
+}
+
+function routingSentence(details: Record<string, unknown>): string {
+  const routing = metadataPreview(details.routing, 24);
+  const visionModel = metadataPreview(details.visionModel, 120);
+  if (routing === "direct") return " The run's model read the image directly.";
+  if (routing === "delegated") return ` Inspected by ${visionModel || "a vision model"}.`;
+  if (routing === "disabled") return " Visual analysis is turned off.";
+  if (routing === "unavailable") return " No vision model was available to inspect it.";
+  if (routing === "budget_exhausted") return " The remaining run budget was too small to inspect it.";
+  return "";
 }
 
 export function safeCommandPreview(value: unknown): string {
@@ -190,7 +230,16 @@ export function safeToolArguments(toolName: string, value: unknown): Record<stri
     };
   }
   if (toolName === "browser_screenshot") {
-    return { fullPage: Boolean(args.fullPage) };
+    return {
+      fullPage: Boolean(args.fullPage),
+      ...(args.question === undefined ? {} : { question: metadataPreview(args.question, QUESTION_PREVIEW_LIMIT) }),
+    };
+  }
+  if (toolName === "inspect_image") {
+    return {
+      artifactId: metadataPreview(args.artifactId, 64),
+      question: metadataPreview(args.question, QUESTION_PREVIEW_LIMIT),
+    };
   }
   if (toolName === "browser_console") {
     return {
@@ -368,6 +417,23 @@ export function persistedToolSummary(input: {
     };
   }
 
+  if (input.toolName === "inspect_image") {
+    const artifactId = metadataPreview(details.artifactId ?? args.artifactId, 64);
+    const bytes = optionalNumber(details.bytes);
+    return {
+      text:
+        `Inspected screenshot ${artifactId || "(unknown)"}${measurements([byteLabel(bytes)])}.` +
+        `${routingSentence(details)} The image and the question were not stored.`,
+      data: {
+        artifactId,
+        ...(bytes === undefined ? {} : { bytes }),
+        mimeType: metadataPreview(details.mimeType, 40),
+        question: metadataPreview(details.question ?? args.question, QUESTION_PREVIEW_LIMIT),
+        ...visionData(details),
+      },
+    };
+  }
+
   if (input.toolName.startsWith("browser_")) {
     return browserSummary(input.toolName, status, details, args);
   }
@@ -474,10 +540,11 @@ function browserSummary(
     const height = optionalNumber(details.height);
     const bytes = optionalNumber(details.bytes);
     return {
-      text: `Captured a screenshot of ${url || "the page"}${measurements([
-        width === undefined || height === undefined ? null : `${width}×${height}`,
-        byteLabel(bytes),
-      ])}. The image is stored as an artifact, not in the database.`,
+      text:
+        `Captured a screenshot of ${url || "the page"}${measurements([
+          width === undefined || height === undefined ? null : `${width}×${height}`,
+          byteLabel(bytes),
+        ])}.${routingSentence(details)} The image is stored as an artifact, not in the database.`,
       data: {
         artifactId: metadataPreview(details.artifactId, 64),
         url,
@@ -486,6 +553,8 @@ function browserSummary(
         ...(bytes === undefined ? {} : { bytes }),
         fullPage: Boolean(details.fullPage),
         truncated: Boolean(details.truncated),
+        question: metadataPreview(details.question ?? args.question, QUESTION_PREVIEW_LIMIT),
+        ...visionData(details),
       },
     };
   }

@@ -29,7 +29,10 @@ import { withRepositoryGitAccess } from "../github/repository-access.js";
 import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
 import { EventWriter } from "./event-writer.js";
+import { modelCapabilities } from "./model-capability.js";
 import { applyProviderRouting, configuredProviderPreferences } from "./openrouter-routing.js";
+import { RunCostAccount } from "./run-cost.js";
+import { createRunVisionRouter, recoverFromUnsupportedImage } from "./vision-router.js";
 import { workspaceManager } from "./workspace-manager.js";
 import { persistedToolSummary, safeToolArguments } from "./output-policy.js";
 
@@ -48,6 +51,7 @@ const durableTools = new Set([
   "browser_press",
   "browser_screenshot",
   "browser_close",
+  "inspect_image",
 ]);
 
 const systemPrompt = [
@@ -60,7 +64,15 @@ const systemPrompt = [
   "- bash runs a shell command from /workspace. The container has outbound internet access, so installs and network requests work without asking.",
   "- start_process, process_logs, and stop_process manage long-running commands such as dev servers. Never start those with bash.",
   "- create_pull_request publishes this chat's branch and opens the pull request. It is the only way to push.",
-  "- browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_press, browser_scroll, browser_wait, browser_screenshot, browser_console, and browser_close drive a real Chromium browser for this chat. Use them to run the application, navigate the interface, test user flows, read console errors, capture screenshots, and confirm visual results.",
+  "- browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_press, browser_scroll, browser_wait, browser_screenshot, inspect_image, browser_console, and browser_close drive a real Chromium browser for this chat. Use them to run the application, navigate the interface, test user flows, read console errors, capture screenshots, and confirm visual results.",
+  "",
+  "Seeing the page:",
+  "- browser_snapshot is the primary way to understand a page. Use it for visible text, buttons, links, forms, element references, page structure, and navigation.",
+  "- browser_screenshot is for how the page looks: layout, colours, spacing, overlapping elements, responsive behaviour, charts, images, and visual comparison. Do not take a screenshot when a snapshot answers the question.",
+  "- Always pass a focused question with a screenshot, such as “Is the heading centred and is any text overflowing?”. A screenshot without a question is answered only in general terms.",
+  "- inspect_image asks a new question about a screenshot you already captured. Pass the artifactId from the earlier browser_screenshot result instead of capturing the same page again.",
+  "- The platform decides how each image is read, and routes it to a vision model when necessary. Never assume or state whether you can see images yourself, and never skip a screenshot because you think you cannot read it.",
+  "- Capture a final screenshot with a question after you finish a change that alters the user interface.",
   "",
   "Browser rules:",
   "- Start the application with start_process, then wait for the server to report that it is listening before opening it.",
@@ -68,7 +80,7 @@ const systemPrompt = [
   "- Still pass ordinary localhost URLs such as http://localhost:3000 to browser_navigate. The platform routes them to this chat.",
   "- Use the browser tools rather than curl whenever you are verifying a user interface.",
   "- Call browser_snapshot before clicking or typing, and act on the references it returns instead of guessed selectors or coordinates.",
-  "- Read browser_console when a page misbehaves, and capture a browser_screenshot after a visual change.",
+  "- Read browser_console when a page misbehaves.",
   "- Call browser_close once the browser is no longer needed.",
   "- Skip the browser entirely for work that does not affect a user interface.",
   "",
@@ -318,9 +330,7 @@ export class AgentWorker {
     );
 
     const writer = new EventWriter(run.session_id, run.id);
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let costUsd = 0;
+    const cost = new RunCostAccount(run.max_cost_usd);
     let turns = 0;
     let parentMessageId = relation.session.currentLeafMessageId;
     const runBaseCommit = relation.session.headCommit;
@@ -374,18 +384,41 @@ export class AgentWorker {
       repositoryPath = location.repository;
       await workspaceManager.ensureSandbox(relation.session.id, repositoryPath);
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
-      await writer.emit("run_started", { model: run.model, workerId: this.workerId });
+
+      const capability = await modelCapabilities.capabilityOf(run.model);
+      await writer.emit("run_started", {
+        model: run.model,
+        workerId: this.workerId,
+        imageInput: capability.supportsImages,
+        capabilitySource: capability.source,
+        visionRoutingMode: config.VISION_ROUTING_MODE,
+      });
+      runLog.info(
+        { imageInput: capability.supportsImages, capabilitySource: capability.source },
+        "Model image capability resolved",
+      );
 
       const branch = await getActiveBranchMessages(run.session_id);
       const history = branch.map(toPiMessage).filter((message): message is AgentMessage => Boolean(message));
-      const model = modelFor(run.model);
+      const model: Model<any> = {
+        ...modelFor(run.model),
+        input: capability.supportsImages ? ["text", "image"] : ["text"],
+      };
+      const vision = createRunVisionRouter({
+        primaryModelId: capability.modelId || run.model,
+        supportsImages: capability.supportsImages,
+        cost,
+        complete: models.completeSimple.bind(models),
+        apiKey: () => config.OPENROUTER_API_KEY,
+        onPayload: applyProviderRouting,
+      });
       const tools = createAgentTools({
         chatId: relation.session.id,
         repositoryPath,
         sessionId: run.session_id,
         runId: run.id,
         writer,
-        supportsImages: model.input.includes("image"),
+        vision,
       });
 
       const agent = new Agent({
@@ -422,32 +455,44 @@ export class AgentWorker {
         }
 
         if (event.type === "message_end" && event.message.role === "assistant") {
-          inputTokens += event.message.usage.input;
-          outputTokens += event.message.usage.output;
-          costUsd += event.message.usage.cost.total;
-          if (costUsd > run.max_cost_usd) agent.abort();
+          cost.addModelUsage(event.message.usage);
+          if (cost.exceededBudget()) agent.abort();
         }
       });
 
       await agent.continue();
       await writer.drain();
+      const demoted = await recoverFromUnsupportedImage({
+        errorMessage: agent.state.errorMessage,
+        vision,
+        chatId: relation.session.id,
+        emit: (type, payload) => writer.emit(type, payload),
+        steer: (text) => agent.steer({ role: "user", content: text, timestamp: Date.now() }),
+      });
+      if (demoted) {
+        model.input.splice(0, model.input.length, "text");
+        await agent.continue();
+        await writer.drain();
+      }
       if (agent.state.errorMessage && !agent.state.errorMessage.toLowerCase().includes("abort")) {
         throw new Error(agent.state.errorMessage);
       }
       await checkpoint();
 
       const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
-      await finishRun({ runId: run.id, status, inputTokens, outputTokens, costUsd });
+      const { visionCostUsd, visionRequests, ...usage } = cost.totals();
+      await finishRun({ runId: run.id, status, ...usage });
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
-      await writer.emit("run_completed", { status, inputTokens, outputTokens, costUsd, turns });
+      await writer.emit("run_completed", { status, ...usage, visionCostUsd, visionRequests, turns });
       runLog.info(
-        { status, inputTokens, outputTokens, costUsd, turns, durationMs: Date.now() - startedAt },
+        { status, ...usage, visionCostUsd, visionRequests, turns, durationMs: Date.now() - startedAt },
         "Agent run finished",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const { visionCostUsd, visionRequests, ...usage } = cost.totals();
       runLog.error(
-        { error: errorForLog(error), inputTokens, outputTokens, costUsd, turns, durationMs: Date.now() - startedAt },
+        { error: errorForLog(error), ...usage, visionCostUsd, visionRequests, turns, durationMs: Date.now() - startedAt },
         "Agent run failed",
       );
       try {
@@ -455,7 +500,7 @@ export class AgentWorker {
       } catch {
         // Preserve the original run error.
       }
-      await finishRun({ runId: run.id, status: "failed", inputTokens, outputTokens, costUsd, error: message });
+      await finishRun({ runId: run.id, status: "failed", ...usage, error: message });
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: repositoryPath ? "ready" : "failed" });
       await writer.emit("run_failed", { error: message });
     } finally {

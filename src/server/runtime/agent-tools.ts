@@ -16,6 +16,7 @@ import { effectiveTimeoutSeconds, platformTimeoutSeconds, runSandboxCommand } fr
 import { SandboxOperations } from "./sandbox-operations.js";
 import { processManager } from "./sandbox-processes.js";
 import { resolveWorkspacePath, WORKSPACE_PATH, workspaceRelativePath } from "./sandbox.js";
+import type { RunVisionRouter } from "./vision-router.js";
 
 export interface ToolContext {
   chatId: string;
@@ -23,7 +24,7 @@ export interface ToolContext {
   sessionId: string;
   runId: string;
   writer: EventWriter;
-  supportsImages?: boolean;
+  vision: RunVisionRouter;
 }
 
 type ToolResult = Awaited<ReturnType<AgentTool["execute"]>>;
@@ -330,7 +331,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         chatId: context.chatId,
         repositoryPath: context.repositoryPath,
         runId: context.runId,
-        supportsImages: Boolean(context.supportsImages),
+        vision: context.vision,
         writer: context.writer,
       })
     : [];

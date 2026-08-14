@@ -215,6 +215,15 @@ export async function getArtifactForUser(
   return accessFor(row?.artifact, row?.repository.ownerUserId, userId);
 }
 
+export async function getArtifactForChat(artifactId: string, sessionId: string) {
+  const [artifact] = await db
+    .select()
+    .from(artifacts)
+    .where(and(eq(artifacts.id, artifactId), eq(artifacts.sessionId, sessionId)))
+    .limit(1);
+  return artifact;
+}
+
 export async function createUserMessageAndRun(input: {
   sessionId: string;
   text: string;

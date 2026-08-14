@@ -3,12 +3,18 @@ import { Type } from "@earendil-works/pi-ai";
 import { config } from "../config.js";
 import { browserSessions } from "./browser-session.js";
 import { safeUrlPreview } from "./output-policy.js";
+import {
+  DEFAULT_INSPECTION_QUESTION,
+  loadImageArtifact,
+  type RunVisionRouter,
+  type VisionOutcome,
+} from "./vision-router.js";
 
 export interface BrowserToolContext {
   chatId: string;
   repositoryPath: string;
   runId: string;
-  supportsImages: boolean;
+  vision: RunVisionRouter;
   writer: { live: (type: string, payload: Record<string, unknown>) => void };
 }
 
@@ -29,6 +35,37 @@ function imageResult(
       { type: "image" as const, data: image.data, mimeType: image.mimeType },
     ],
     details,
+  };
+}
+
+const QUESTION_LIMIT = 400;
+
+function inspectionQuestion(value: unknown): string {
+  const question = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!question) return DEFAULT_INSPECTION_QUESTION;
+  return question.length <= QUESTION_LIMIT ? question : `${question.slice(0, QUESTION_LIMIT - 1)}…`;
+}
+
+function visionDetails(outcome: VisionOutcome): Record<string, unknown> {
+  return {
+    routing: outcome.decision,
+    structured: outcome.structured,
+    visionDurationMs: outcome.durationMs,
+    ...(outcome.visionModelId === undefined ? {} : { visionModel: outcome.visionModelId }),
+    ...(outcome.usage === undefined
+      ? {}
+      : {
+          visionInputTokens: outcome.usage.inputTokens,
+          visionOutputTokens: outcome.usage.outputTokens,
+          visionCostUsd: outcome.usage.costUsd,
+        }),
+    ...(outcome.analysis === undefined
+      ? {}
+      : {
+          confidence: outcome.analysis.confidence,
+          visualProblems: outcome.analysis.visualProblems.length,
+          visionSummary: outcome.analysis.answer,
+        }),
   };
 }
 
@@ -326,12 +363,22 @@ export function createBrowserTools(context: BrowserToolContext): AgentTool[] {
     name: "browser_screenshot",
     label: "browser screenshot",
     description:
-      "Capture a PNG of the current page. The image appears in the chat, and is attached to this result when the active model reads images.",
+      "Capture a PNG of the current page and have it inspected visually. Use it for layout, spacing, colour, " +
+      "overlapping elements, responsive behaviour, charts, and images; use browser_snapshot for text and structure. " +
+      "Pass a question describing what to check. The image always appears in the chat, and the platform decides " +
+      "whether to read it directly or have a vision model describe it.",
     parameters: Type.Object({
       fullPage: Type.Optional(Type.Boolean({ description: "Capture the whole scrollable page instead of the viewport" })),
+      question: Type.Optional(
+        Type.String({
+          maxLength: QUESTION_LIMIT,
+          description: "What to check in the screenshot, for example “Is the heading centred and is any text overflowing?”",
+        }),
+      ),
     }),
     executionMode: "sequential",
     execute: async (callId, params: any, signal) => {
+      const question = inspectionQuestion(params.question);
       const capture = await browserSessions.screenshot({
         ...base,
         runId: context.runId,
@@ -348,6 +395,29 @@ export function createBrowserTools(context: BrowserToolContext): AgentTool[] {
         bytes: capture.bytes,
       });
 
+      const caption =
+        `Captured ${capture.width}×${capture.height} screenshot of ${capture.url}.` +
+        `${capture.truncated ? " The page was taller than the capture limit, so the top was captured." : ""}`;
+
+      const outcome = await context.vision
+        .inspect({
+          question,
+          image: { base64: capture.base64, mimeType: "image/png", bytes: capture.bytes },
+          signal,
+        })
+        .catch((error: unknown) => {
+          if (signal?.aborted) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          return {
+            decision: "unavailable" as const,
+            text:
+              `The screenshot could not be analysed: ${reason.slice(0, 300)} ` +
+              "It is available in the chat. Use browser_snapshot to reason about the page.",
+            structured: false,
+            durationMs: 0,
+          };
+        });
+
       const details = {
         artifactId: capture.artifactId,
         url: capture.url,
@@ -357,19 +427,73 @@ export function createBrowserTools(context: BrowserToolContext): AgentTool[] {
         fullPage: Boolean(params.fullPage),
         truncated: capture.truncated,
         durationMs: capture.durationMs,
+        question,
+        primaryModel: context.vision.primaryModelId,
+        ...visionDetails(outcome),
       };
-      const caption =
-        `Captured ${capture.width}×${capture.height} screenshot of ${capture.url}.` +
-        `${capture.truncated ? " The page was taller than the capture limit, so the top was captured." : ""}`;
 
-      if (!context.supportsImages) {
-        return textResult(
-          `${caption} The active model does not read images, so it is available in the chat only. ` +
-            "Use browser_snapshot to reason about the page.",
+      if (outcome.decision === "direct" && outcome.image) {
+        context.vision.recordDirectDelivery({ artifactId: capture.artifactId, question });
+        return imageResult(
+          `${caption}\n\nInspect the attached image and answer: ${question}`,
+          { data: outcome.image.base64, mimeType: outcome.image.mimeType },
           details,
         );
       }
-      return imageResult(caption, { data: capture.base64, mimeType: "image/png" }, details);
+      return textResult(`${caption}\n\n${outcome.text}`, details);
+    },
+  };
+
+  const inspectImage: AgentTool = {
+    name: "inspect_image",
+    label: "inspect image",
+    description:
+      "Ask a question about a screenshot that was already captured in this chat, using the artifactId from an " +
+      "earlier browser_screenshot result. Use this instead of capturing the same page again. Every call performs " +
+      "a fresh inspection.",
+    parameters: Type.Object({
+      artifactId: Type.String({
+        minLength: 1,
+        maxLength: 64,
+        description: "artifactId from an earlier browser_screenshot result",
+      }),
+      question: Type.String({
+        minLength: 1,
+        maxLength: QUESTION_LIMIT,
+        description: "What to check in the image, for example “Do the two cards have equal padding?”",
+      }),
+    }),
+    execute: async (callId, params: any, signal) => {
+      const artifactId = String(params.artifactId ?? "").trim();
+      const question = inspectionQuestion(params.question);
+      const image = await loadImageArtifact({ artifactId, chatId: context.chatId });
+      const outcome = await context.vision.inspect({ question, image, signal });
+
+      announce("inspect_image", {
+        callId,
+        artifactId,
+        routing: outcome.decision,
+        bytes: image.bytes,
+      });
+
+      const details = {
+        artifactId,
+        bytes: image.bytes,
+        mimeType: image.mimeType,
+        question,
+        primaryModel: context.vision.primaryModelId,
+        ...visionDetails(outcome),
+      };
+
+      if (outcome.decision === "direct" && outcome.image) {
+        context.vision.recordDirectDelivery({ artifactId, question });
+        return imageResult(
+          `Inspecting the stored screenshot ${artifactId}.\n\nInspect the attached image and answer: ${question}`,
+          { data: outcome.image.base64, mimeType: outcome.image.mimeType },
+          details,
+        );
+      }
+      return textResult(`Inspected the stored screenshot ${artifactId}.\n\n${outcome.text}`, details);
     },
   };
 
@@ -425,5 +549,5 @@ export function createBrowserTools(context: BrowserToolContext): AgentTool[] {
     },
   };
 
-  return [navigate, snapshot, click, type, select, press, scroll, wait, screenshot, consoleTool, close];
+  return [navigate, snapshot, click, type, select, press, scroll, wait, screenshot, inspectImage, consoleTool, close];
 }

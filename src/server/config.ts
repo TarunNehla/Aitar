@@ -36,6 +36,12 @@ const envSchema = z.object({
   BROWSER_ACTION_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(30),
   BROWSER_NAVIGATION_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(60),
   BROWSER_SCREENSHOT_MAX_BYTES: z.coerce.number().int().positive().default(10_485_760),
+  VISION_ROUTING_MODE: z.enum(["auto", "always_delegate", "disabled"]).default("auto"),
+  VISION_MODEL: z.string().default(""),
+  VISION_CAPABILITY_OVERRIDES: z.string().default(""),
+  VISION_CAPABILITY_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(21_600),
+  VISION_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().positive().default(60),
+  VISION_MAX_IMAGE_BYTES: z.coerce.number().int().positive().default(10_485_760),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
   LOG_PRETTY: z.enum(["true", "false"]).optional(),
@@ -70,6 +76,19 @@ function providerSlugs(value: string): string[] {
   return [...new Set(value.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean))];
 }
 
+function capabilityOverrides(value: string): Record<string, "image" | "text"> {
+  const entries: Array<[string, "image" | "text"]> = [];
+  for (const entry of value.split(",")) {
+    const [rawId, rawMode] = entry.split("=");
+    const id = rawId?.trim().toLowerCase();
+    const mode = rawMode?.trim().toLowerCase();
+    if (!id) continue;
+    if (mode !== "image" && mode !== "text") continue;
+    entries.push([id, mode]);
+  }
+  return Object.fromEntries(entries);
+}
+
 const appUrl = new URL(parsed.data.APP_URL);
 const isProduction = parsed.data.NODE_ENV === "production";
 
@@ -85,6 +104,8 @@ export const config = {
   OPENROUTER_PROVIDERS: providerSlugs(parsed.data.OPENROUTER_PROVIDERS),
   OPENROUTER_ALLOW_FALLBACKS: parsed.data.OPENROUTER_ALLOW_FALLBACKS === "true",
   BROWSER_ENABLED: parsed.data.BROWSER_ENABLED === "true",
+  VISION_MODEL: parsed.data.VISION_MODEL.trim(),
+  VISION_CAPABILITY_OVERRIDES: capabilityOverrides(parsed.data.VISION_CAPABILITY_OVERRIDES),
   GITHUB_APP_PRIVATE_KEY: normalisePrivateKey(parsed.data.GITHUB_APP_PRIVATE_KEY),
   WORKSPACE_ROOT: resolve(parsed.data.WORKSPACE_ROOT),
   LOG_LEVEL: parsed.data.LOG_LEVEL ?? (isProduction ? "info" : "debug"),
@@ -95,6 +116,8 @@ export const config = {
     ? [appUrl.origin]
     : [...new Set([appUrl.origin, ...developmentOrigins])],
 };
+
+export const visionDelegationConfigured = Boolean(config.VISION_MODEL);
 
 export const googleProviderConfigured = Boolean(config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET);
 export const githubProviderConfigured = Boolean(config.GITHUB_CLIENT_ID && config.GITHUB_CLIENT_SECRET);

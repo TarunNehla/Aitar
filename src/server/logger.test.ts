@@ -65,6 +65,42 @@ describe("logger", () => {
     }
   });
 
+  it("never logs screenshot bytes or a vision prompt, at any nesting level", () => {
+    const bytes = "iVBORw0KGgoAAAANSUhEUgAAScreenshotBytes";
+    const { raw } = capture((testLogger) =>
+      testLogger.info(
+        {
+          base64: bytes,
+          imageBase64: bytes,
+          imageData: bytes,
+          screenshotBase64: bytes,
+          visionPrompt: "the full observer prompt",
+          visionResponse: "the raw provider response",
+          vision: { base64: bytes, visionPrompt: "nested prompt" },
+          details: { vision: { imageBase64: bytes } },
+        },
+        "Vision redaction",
+      ),
+    );
+
+    for (const value of [bytes, "the full observer prompt", "the raw provider response", "nested prompt"]) {
+      expect(raw).not.toContain(value);
+    }
+  });
+
+  it("still logs the routing metadata a vision request produces", () => {
+    const { entry } = capture((testLogger) =>
+      testLogger.info(
+        { routing: "delegated", visionModel: "google/gemini-3.7-flash", visionCostUsd: 0.0009, confidence: 0.86 },
+        "Vision metadata",
+      ),
+    );
+
+    expect(entry.routing).toBe("delegated");
+    expect(entry.visionModel).toBe("google/gemini-3.7-flash");
+    expect(entry.visionCostUsd).toBe(0.0009);
+  });
+
   it("redacts GitHub tokens and authorization headers found inside strings", () => {
     const installationToken = "ghs_abcdefghijklmnopqrstuvwxyz012345";
     const { raw } = capture((testLogger) =>
