@@ -30,6 +30,11 @@ const secretKeys = [
   "GITHUB_CLIENT_SECRET",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",
+  "RESEND_API_KEY",
+  "newPassword",
+  "currentPassword",
+  "verificationToken",
+  "resetToken",
   "base64",
   "imageBase64",
   "imageData",
@@ -55,6 +60,8 @@ const redactPaths = [
 
 const secretPatterns: Array<[RegExp, string]> = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[Redacted]"],
+  [/\b(re_[A-Za-z0-9_-]{8,})/g, "re_[Redacted]"],
+  [/\/(reset-password|verify-email)\/[^/?\s"']+/g, "/$1/[Redacted]"],
   [/\/\/[^/\s:@]+:[^/\s@]+@/g, "//[Redacted]@"],
   [/x-access-token:[^@\s/]+/gi, "x-access-token:[Redacted]"],
   [/\bgh[pousr]_[A-Za-z0-9]{16,}/g, "gh_[Redacted]"],

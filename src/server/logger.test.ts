@@ -127,6 +127,42 @@ describe("logger", () => {
     expect(redactSecrets("gho_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBe("gh_[Redacted]");
   });
 
+  it("never writes a credential request body, password, or authentication token", () => {
+    const { raw } = capture((testLogger) =>
+      testLogger.info(
+        {
+          body: { email: "ada@example.com", password: "correct horse 9" },
+          request: { body: { newPassword: "a stronger secret", token: "reset-token-value" } },
+          newPassword: "a stronger secret",
+          currentPassword: "correct horse 9",
+          verificationToken: "verify-token-value",
+          resetToken: "reset-token-value",
+          RESEND_API_KEY: "re_live_abcdefghijklmnop",
+        },
+        "Credential request",
+      ),
+    );
+
+    for (const value of [
+      "correct horse 9",
+      "a stronger secret",
+      "reset-token-value",
+      "verify-token-value",
+      "re_live_abcdefghijklmnop",
+    ]) {
+      expect(raw, value).not.toContain(value);
+    }
+  });
+
+  it("redacts the token out of verification and reset URLs", () => {
+    expect(redactSecrets("GET /api/auth/verify-email?token=eyJhbGciOi.J9&callbackURL=%2F")).not.toContain("eyJhbGciOi");
+    expect(redactSecrets("GET /api/auth/reset-password/abc123def456?callbackURL=%2F")).toBe(
+      "GET /api/auth/reset-password/[Redacted]?callbackURL=%2F",
+    );
+    expect(redactSecrets("GET /reset-password?token=abc123def456")).not.toContain("abc123def456");
+    expect(redactSecrets("Resend key re_live_abcdefghijklmnop rejected")).not.toContain("abcdefghijklmnop");
+  });
+
   it("does not expose error messages", () => {
     const error = Object.assign(new Error("private command output"), { code: "EFAIL" });
     expect(errorForLog(error)).toEqual({ name: "Error", code: "EFAIL" });

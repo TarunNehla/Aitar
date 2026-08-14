@@ -3,10 +3,19 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
-import { clearAuthQueryParameters, readAuthQueryParameters, useSession } from "./auth-client";
+import {
+  clearAuthQueryParameters,
+  readAuthQueryParameters,
+  readResetPasswordToken,
+  resetPasswordPath,
+  returnToSignIn,
+  useAuthMethods,
+  useSession,
+} from "./auth-client";
 import { Dialog } from "./components/Dialog";
 import { Icon, type IconName } from "./components/Icon";
 import { RepositoryConnect } from "./components/RepositoryConnect";
+import { ResetPassword } from "./components/ResetPassword";
 import { SignIn } from "./components/SignIn";
 import { Spinner } from "./components/Spinner";
 import { UserMenu, type SessionUser } from "./components/UserMenu";
@@ -517,14 +526,32 @@ function useRotatingStatus(active: boolean): string {
 
 export function App() {
   const { data: session, isPending } = useSession();
+  const authMethods = useAuthMethods();
   const [authQuery] = useState(() => readAuthQueryParameters(window.location.search));
+  const [resetToken] = useState(() => readResetPasswordToken(window.location));
+  const [resettingPassword, setResettingPassword] = useState(() => window.location.pathname === resetPasswordPath);
 
   useEffect(() => {
     clearAuthQueryParameters();
   }, []);
 
+  if (resettingPassword) {
+    return (
+      <ResetPassword
+        token={resetToken}
+        onDone={() => {
+          returnToSignIn();
+          setResettingPassword(false);
+        }}
+      />
+    );
+  }
+
   if (isPending) return <div className="center-state">Opening Aitar…</div>;
-  if (!session?.user) return <SignIn error={authQuery.oauthError} />;
+  if (!session?.user) {
+    if (!authMethods) return <div className="center-state">Opening Aitar…</div>;
+    return <SignIn error={authQuery.oauthError} emailPassword={authMethods.emailPassword} />;
+  }
 
   return (
     <Console

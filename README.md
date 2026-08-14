@@ -16,6 +16,7 @@ Docker isolates repository commands.
 
 ## V0 features
 
+- Google, GitHub, and optional email and password sign-in, with verified email and password reset.
 - Persistent repositories and chat sessions.
 - Branching message history through parent message IDs.
 - Live assistant, tool, command, and file events through SSE.
@@ -65,15 +66,17 @@ Set the value as `BETTER_AUTH_SECRET`.
 
 6. Add the Google and GitHub sign-in credentials described in [Authentication](#authentication).
 
-7. Add the GitHub App credentials described in [GitHub App](#github-app) if you need private repositories.
+7. Set `EMAIL_PASSWORD_AUTH_ENABLED`, `RESEND_API_KEY`, and `AUTH_EMAIL_FROM` if you want email and password sign-in. See [Email and password configuration](#email-and-password-configuration).
 
-8. Apply the database schema.
+8. Add the GitHub App credentials described in [GitHub App](#github-app) if you need private repositories.
+
+9. Apply the database schema.
 
 ```sh
 pnpm db:migrate
 ```
 
-9. Start the application.
+10. Start the application.
 
 ```sh
 pnpm dev
@@ -139,7 +142,7 @@ Each run logs the routing it used under `providerRouting`.
 
 Better Auth owns sign-in, sessions, and account linking.
 
-Users sign in with Google or GitHub. Both providers map to one internal user.
+Users sign in with Google, with GitHub, or with an email address and a password. Every method maps to one internal user.
 
 Sessions are stored in Neon in the `auth_sessions` table and carried in a secure, HttpOnly, SameSite=Lax cookie.
 
@@ -150,6 +153,56 @@ Session cookie caching is disabled so revoking a session takes effect immediatel
 Account linking is explicit. Signing in with a second provider does not merge accounts, even when the email address matches. An authenticated user connects the second provider from the account menu, and only when both providers report the same email address.
 
 Provider tokens live only in the Better Auth `accounts` table and are encrypted with `account.encryptOAuthTokens`.
+
+### Email and password configuration
+
+Email and password sign-in is off until a deployment turns it on, because verification and reset links are useless without a way to send mail.
+
+```env
+EMAIL_PASSWORD_AUTH_ENABLED=true
+RESEND_API_KEY=re_...
+AUTH_EMAIL_FROM=Aitar <no-reply@your-domain>
+```
+
+Setting `EMAIL_PASSWORD_AUTH_ENABLED=true` without both other values fails startup with a configuration error rather than accepting sign-ups it cannot verify. `AUTH_EMAIL_FROM` accepts a bare address or the `Display Name <address>` form.
+
+To create the key, sign in to Resend, open API keys, and create one with sending permission. Add your domain under Domains and publish the DKIM, SPF, and return-path records Resend generates. Wait for the domain to read as verified before pointing `AUTH_EMAIL_FROM` at it; mail from an unverified domain is rejected.
+
+`RESEND_API_KEY` is server-only. It is never sent to the browser, and the Authorization header carrying it is redacted from logs.
+
+Passwords are hashed by Better Auth with scrypt and stored in `accounts.password` on the `credential` account. No password is ever stored on the `users` row, sent to an agent container, or written to a log, an event, or the chat history.
+
+### Verification and password reset
+
+Signing up creates no session. Better Auth emails a verification link, and the screen reports the same generic result whether or not the address already has an account, so signup cannot be used to discover who is registered.
+
+Signing in with an unverified address sends a fresh verification link and refuses the session. The sign-in screen also offers a manual resend.
+
+Verification and reset links expire after one hour. A reset link can be used once. Completing a reset revokes every other session for that user.
+
+Sign-in reports one message for an unknown address and for a wrong password, and password reset reports one message for every address, so neither reveals who has an account.
+
+### Existing Google and GitHub users
+
+An account created through Google or GitHub has no password. Its owner adds one with **Forgot password**: the emailed link proves control of the address, and Better Auth then adds a `credential` account to the existing user.
+
+This creates no second user row and no second Aitar account. Google and GitHub sign-in keeps working alongside the new password.
+
+Explicit account linking is unchanged. Neither provider is a trusted provider, and no account is merged on matching email text alone.
+
+### Rate limits
+
+Better Auth's built-in rate limiting is enabled in production and stores counters in memory, which suits the single-backend V0. Running more than one backend instance needs shared storage before these limits mean anything.
+
+Sign-in, sign-up, verification resend, password reset requests, password reset, and password change are each capped well below the framework defaults. A capped request answers `429` with an `X-Retry-After` header, and the interface reports how long to wait.
+
+Client IPs come from Better Auth's default resolution. No forwarded-IP header is trusted beyond that; configure `advanced.ipAddress` only once a real reverse proxy in front of Aitar sets one.
+
+### Secrets
+
+`BETTER_AUTH_SECRET`, `RESEND_API_KEY`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` are server-only. None is exposed to the frontend, and all are redacted from logs.
+
+Production must serve Aitar over HTTPS. `APP_URL` is rejected at startup if it is not HTTPS in production, and session cookies are only marked `Secure` there.
 
 ### Google configuration
 
@@ -178,6 +231,8 @@ Use the same GitHub App that provides repository access, and enable its user aut
 | Account permission | Email addresses: Read-only |
 
 Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` from the app's OAuth credentials.
+
+Signing in with GitHub is separate from installing the GitHub App on a repository. Signing in identifies the user; the installation described below is what grants repository access. Neither implies the other, and a user who signs in with an email address and a password still installs the app to connect a repository.
 
 ## GitHub App
 
@@ -282,6 +337,8 @@ Logs include request IDs, run IDs, chat IDs, repository IDs, tool names, timing,
 Logs do not include prompts, complete commands, file contents, command output, API keys, cookies, or database URLs.
 
 Redaction also covers authorization headers, OAuth access and refresh tokens, GitHub installation and personal access tokens, private keys, client secrets, and credentials embedded in URLs.
+
+Passwords, verification tokens, reset tokens, the Resend API key, and complete verification and reset URLs are redacted as well. Better Auth's own messages are routed through the same logger with email addresses masked.
 
 ## Production
 

@@ -9,6 +9,7 @@ interface SessionState {
 }
 
 let sessionState: SessionState = { data: null, isPending: false };
+let authMethods: { emailPassword: boolean } | null = { emailPassword: true };
 const signOutMock = vi.fn(async () => {
   sessionState = { data: null, isPending: false };
 });
@@ -18,10 +19,16 @@ vi.mock("./auth-client", async () => {
   return {
     ...actual,
     useSession: () => sessionState,
-    signIn: { social: vi.fn(async () => ({ error: null })) },
+    useAuthMethods: () => authMethods,
+    signIn: { social: vi.fn(async () => ({ error: null })), email: vi.fn(async () => ({ error: null })) },
+    signUp: { email: vi.fn(async () => ({ error: null })) },
     signOut: signOutMock,
     linkSocial: vi.fn(async () => ({ error: null })),
     listAccounts: vi.fn(async () => ({ data: [{ providerId: "google" }], error: null })),
+    sendVerificationEmail: vi.fn(async () => ({ error: null })),
+    requestPasswordReset: vi.fn(async () => ({ error: null })),
+    resetPassword: vi.fn(async () => ({ error: null })),
+    changePassword: vi.fn(async () => ({ error: null })),
     authClient: { getSession: vi.fn() },
   };
 });
@@ -120,10 +127,12 @@ function toolMessage(id: string, toolName: string, data: Record<string, unknown>
 const { App } = await import("./App");
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "/");
   sessions = [newSession()];
   sessionMessages = [];
   sessionPullRequests = [];
   sessionState = { data: null, isPending: false };
+  authMethods = { emailPassword: true };
   signOutMock.mockClear();
   apiMock.mockReset();
   apiMock.mockImplementation(async (path: string, options?: RequestInit) => respond(path, options));
@@ -186,6 +195,47 @@ describe("authenticated application state", () => {
     expect(screen.queryByText("Confidential project")).toBeNull();
     expect(screen.queryByText("Private chat title")).toBeNull();
     expect(screen.queryByText("ada@example.com")).toBeNull();
+  });
+
+  it("offers the email and password form only where the deployment enables it", () => {
+    render(<App />);
+    expect(screen.getByLabelText("Email")).toBeDefined();
+    expect(screen.getByLabelText("Password")).toBeDefined();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeDefined();
+
+    cleanup();
+    authMethods = { emailPassword: false };
+    render(<App />);
+
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
+    expect(screen.getByText("Continue with Google")).toBeDefined();
+  });
+
+  it("waits for the sign-in methods before drawing the screen", () => {
+    authMethods = null;
+    render(<App />);
+
+    expect(screen.getByText("Opening Aitar…")).toBeDefined();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+  });
+
+  it("opens the reset view from an emailed link and takes the token out of the URL", async () => {
+    window.history.replaceState({}, "", "/reset-password?token=reset-token-value");
+    render(<App />);
+
+    expect(screen.getByText("Choose a new password")).toBeDefined();
+    expect(screen.getByLabelText("New password")).toBeDefined();
+    await waitFor(() => expect(window.location.search).not.toContain("reset-token-value"));
+    expect(document.body.textContent).not.toContain("reset-token-value");
+  });
+
+  it("explains an incomplete reset link instead of showing a form that cannot work", () => {
+    window.history.replaceState({}, "", "/reset-password");
+    render(<App />);
+
+    expect(screen.getByText("That link is incomplete")).toBeDefined();
+    expect(screen.queryByLabelText("New password")).toBeNull();
   });
 
   it("remounts the console with fresh state when the signed-in user changes", async () => {

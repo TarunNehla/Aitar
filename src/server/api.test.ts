@@ -133,6 +133,12 @@ describe("API authentication", () => {
     expect(response.status).toBe(200);
   });
 
+  it("tells a signed-out browser which sign-in methods exist", async () => {
+    const response = await call("/api/auth-methods");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ emailPassword: true });
+  });
+
   it("rejects unauthenticated API requests with 401", async () => {
     const paths = [
       "/api/repositories",

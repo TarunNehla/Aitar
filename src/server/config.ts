@@ -46,6 +46,9 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).optional(),
   LOG_PRETTY: z.enum(["true", "false"]).optional(),
   BETTER_AUTH_SECRET: z.string().min(32),
+  EMAIL_PASSWORD_AUTH_ENABLED: z.enum(["true", "false"]).default("false"),
+  RESEND_API_KEY: z.string().min(1).optional(),
+  AUTH_EMAIL_FROM: z.string().min(1).optional(),
   GOOGLE_CLIENT_ID: z.string().min(1).optional(),
   GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
   GITHUB_CLIENT_ID: z.string().min(1).optional(),
@@ -98,12 +101,36 @@ if (isProduction && appUrl.protocol !== "https:") {
 
 const developmentOrigins = ["http://localhost:5173", `http://localhost:${parsed.data.PORT}`];
 
+const emailPasswordAuthRequested = parsed.data.EMAIL_PASSWORD_AUTH_ENABLED === "true";
+
+/** Accepts a bare address or the "Display Name <address>" form Resend expects. */
+export function senderAddress(value: string): string | null {
+  const address = /<([^<>]+)>\s*$/.exec(value.trim())?.[1] ?? value.trim();
+  return z.email().safeParse(address).success ? address : null;
+}
+
+if (emailPasswordAuthRequested) {
+  const missing = [
+    parsed.data.RESEND_API_KEY ? null : "RESEND_API_KEY",
+    parsed.data.AUTH_EMAIL_FROM ? null : "AUTH_EMAIL_FROM",
+  ].filter(Boolean);
+  if (missing.length > 0) {
+    throw new Error(
+      `EMAIL_PASSWORD_AUTH_ENABLED=true requires working email configuration. Set: ${missing.join(", ")}`,
+    );
+  }
+  if (!senderAddress(parsed.data.AUTH_EMAIL_FROM as string)) {
+    throw new Error('AUTH_EMAIL_FROM must contain a valid address, such as "Aitar <no-reply@example.com>"');
+  }
+}
+
 export const config = {
   ...parsed.data,
   APP_URL: appUrl.origin,
   OPENROUTER_PROVIDERS: providerSlugs(parsed.data.OPENROUTER_PROVIDERS),
   OPENROUTER_ALLOW_FALLBACKS: parsed.data.OPENROUTER_ALLOW_FALLBACKS === "true",
   BROWSER_ENABLED: parsed.data.BROWSER_ENABLED === "true",
+  EMAIL_PASSWORD_AUTH_ENABLED: emailPasswordAuthRequested,
   VISION_MODEL: parsed.data.VISION_MODEL.trim(),
   VISION_CAPABILITY_OVERRIDES: capabilityOverrides(parsed.data.VISION_CAPABILITY_OVERRIDES),
   GITHUB_APP_PRIVATE_KEY: normalisePrivateKey(parsed.data.GITHUB_APP_PRIVATE_KEY),
@@ -118,6 +145,8 @@ export const config = {
 };
 
 export const visionDelegationConfigured = Boolean(config.VISION_MODEL);
+
+export const emailPasswordAuthConfigured = config.EMAIL_PASSWORD_AUTH_ENABLED;
 
 export const googleProviderConfigured = Boolean(config.GOOGLE_CLIENT_ID && config.GOOGLE_CLIENT_SECRET);
 export const githubProviderConfigured = Boolean(config.GITHUB_CLIENT_ID && config.GITHUB_CLIENT_SECRET);

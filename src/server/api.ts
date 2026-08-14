@@ -5,7 +5,12 @@ import { toNodeHandler } from "better-auth/node";
 import { z } from "zod";
 import { auth } from "./auth/auth.js";
 import { authenticatedUser, requireAuthentication } from "./auth/session.js";
-import { config, githubAppConfigured, githubWebhookConfigured } from "./config.js";
+import {
+  config,
+  emailPasswordAuthConfigured,
+  githubAppConfigured,
+  githubWebhookConfigured,
+} from "./config.js";
 import { errorForLog, httpLogger, logger } from "./logger.js";
 import {
   GitHubAppNotConfiguredError,
@@ -165,6 +170,10 @@ export function createApi() {
 
   app.get("/api/health", (_request, response) => {
     response.json({ ok: true });
+  });
+
+  app.get("/api/auth-methods", (_request, response) => {
+    response.json({ emailPassword: emailPasswordAuthConfigured });
   });
 
   app.all("/api/auth/*splat", toNodeHandler(auth));

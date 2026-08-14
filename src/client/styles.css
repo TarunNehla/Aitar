@@ -983,6 +983,99 @@ button:disabled { cursor: not-allowed; }
 .link-button:hover:not(:disabled) { color: var(--text-link-hover); text-decoration: underline; }
 .link-button:disabled { opacity: 0.45; }
 
+/* ── Credential forms ──────────────────────────────────────────────────── */
+/* One column at every width, so nothing reflows between phone and desktop. */
+
+.auth-form { gap: var(--space-6); }
+.auth-fields { display: grid; gap: var(--space-5); }
+.auth-field { display: grid; gap: var(--space-3); min-width: 0; }
+.auth-field label { color: var(--text-body); font: var(--type-ui); }
+.auth-field input {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--space-6);
+  color: var(--text-strong);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  outline: 0;
+  font: var(--type-body);
+  font-size: var(--text-sm);
+  transition: var(--transition-control);
+}
+.auth-field input:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
+.auth-field input:disabled { color: var(--text-muted); background: var(--surface-sunken); }
+
+.field-error { color: var(--text-danger); font: var(--type-caption); text-wrap: pretty; }
+.auth-field input[aria-invalid="true"] { border-color: var(--red-500); }
+.auth-field input[aria-invalid="true"]:focus { border-color: var(--red-500); box-shadow: var(--focus-ring-danger); }
+
+.password-input { position: relative; display: block; }
+.auth-field .password-input input { padding-right: 64px; }
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  font: var(--type-caption);
+  transform: translateY(-50%);
+}
+.password-toggle:hover:not(:disabled) { color: var(--text-strong); background: var(--surface-hover); }
+.password-toggle:disabled { opacity: 0.45; }
+
+.auth-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.setup-form .auth-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  color: var(--text-body);
+  font: var(--type-ui);
+}
+.setup-form .auth-checkbox input {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--action-primary);
+}
+.auth-submit { height: 42px; font-size: var(--text-md); }
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  color: var(--text-faint);
+  font: var(--type-caption);
+}
+.auth-divider::before,
+.auth-divider::after {
+  flex: 1;
+  height: 1px;
+  background: var(--border-hairline);
+  content: "";
+}
+
+.auth-footer { color: var(--text-muted); font: var(--type-ui); text-align: center; text-wrap: pretty; }
+.auth-hint { color: var(--text-faint); font: var(--type-caption); text-wrap: pretty; }
+.auth-hint strong { color: var(--text-muted); }
+
+.auth-notice { display: grid; gap: var(--space-4); }
+.auth-notice h2 { color: var(--text-strong); font: var(--type-heading); letter-spacing: var(--tracking-heading); }
+.auth-notice p { color: var(--text-muted); font: var(--type-body); font-size: var(--text-sm); text-wrap: pretty; }
+
+.auth-resend { display: grid; gap: var(--space-4); justify-items: start; }
+.auth-resend small { color: var(--text-muted); font: var(--type-caption); text-wrap: pretty; }
+
 /* ── Account menu ──────────────────────────────────────────────────────── */
 
 .user-menu { position: relative; }
@@ -1065,6 +1158,10 @@ button:disabled { cursor: not-allowed; }
   font: var(--type-caption);
 }
 .user-menu-hint { color: var(--text-faint); font: var(--type-caption); text-wrap: pretty; }
+.user-menu-password { display: grid; gap: var(--space-4); justify-items: start; }
+.user-menu-password.auth-fields { justify-items: stretch; }
+.user-menu-password-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-5); }
+.user-menu-password-actions .primary-button { height: 32px; }
 .user-menu-action {
   display: flex;
   align-items: center;

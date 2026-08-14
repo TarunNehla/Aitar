@@ -1,6 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { linkSocial, listAccounts, providerLabels, signOut, type SocialProvider } from "../auth-client";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  changePassword,
+  describeAuthError,
+  linkSocial,
+  listAccounts,
+  providerLabels,
+  requestPasswordReset,
+  resetPasswordPath,
+  retryAfterCollector,
+  signOut,
+  useAuthMethods,
+  type SocialProvider,
+} from "../auth-client";
 import { Icon } from "./Icon";
+import { PasswordInput } from "./PasswordInput";
+import { describePasswordProblem } from "./SignIn";
 import { Spinner } from "./Spinner";
 
 export interface SessionUser {
@@ -20,9 +34,11 @@ function initials(user: SessionUser): string {
 export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut: () => void }) {
   const [open, setOpen] = useState(false);
   const [connected, setConnected] = useState<SocialProvider[] | null>(null);
+  const [hasPassword, setHasPassword] = useState<boolean | null>(null);
   const [busy, setBusy] = useState<SocialProvider | "sign-out" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const authMethods = useAuthMethods();
 
   const loadAccounts = useCallback(async () => {
     const result = await listAccounts();
@@ -30,10 +46,12 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
       setError("Connected accounts could not be loaded");
       return;
     }
-    const providers = (result.data ?? [])
+    const accounts = result.data ?? [];
+    const providers = accounts
       .map((account) => account.providerId)
       .filter((provider): provider is SocialProvider => provider === "google" || provider === "github");
     setConnected([...new Set(providers)]);
+    setHasPassword(accounts.some((account) => account.providerId === "credential"));
   }, []);
 
   useEffect(() => {
@@ -138,6 +156,19 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
             </small>
           </div>
 
+          {authMethods?.emailPassword && (
+            <div className="user-menu-section">
+              <p className="eyebrow">Password</p>
+              {hasPassword === null ? (
+                <Spinner size={14} label="Loading password settings…" />
+              ) : hasPassword ? (
+                <ChangePasswordForm disabled={busy !== null} />
+              ) : (
+                <CreatePasswordAction email={user.email} disabled={busy !== null} />
+              )}
+            </div>
+          )}
+
           {error && <div className="form-error">{error}</div>}
 
           <button
@@ -152,6 +183,163 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ChangePasswordForm({ disabled }: { disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<{ password?: string; confirmation?: string }>({});
+  const [message, setMessage] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  function reset() {
+    setCurrent("");
+    setNext("");
+    setConfirmation("");
+    setFieldErrors({});
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting) return;
+
+    const problems = describePasswordProblem(next, confirmation);
+    setFieldErrors(problems);
+    if (Object.keys(problems).length > 0) return;
+
+    setSubmitting(true);
+    setMessage(null);
+
+    const retry = retryAfterCollector();
+    const result = await changePassword({
+      currentPassword: current,
+      newPassword: next,
+      revokeOtherSessions: true,
+      fetchOptions: retry.fetchOptions,
+    });
+
+    setSubmitting(false);
+    reset();
+    if (result.error) {
+      setFailed(true);
+      setMessage(describeAuthError(result.error, retry.state.seconds));
+      return;
+    }
+    setFailed(false);
+    setMessage("Password updated. Your other sessions were signed out");
+    setOpen(false);
+  }
+
+  if (!open) {
+    return (
+      <div className="user-menu-password">
+        <button
+          className="link-button"
+          type="button"
+          disabled={disabled}
+          onClick={() => {
+            setMessage(null);
+            setOpen(true);
+          }}
+        >
+          Change password
+        </button>
+        {message && <small className={failed ? "field-error" : "user-menu-hint"} role="status">{message}</small>}
+      </div>
+    );
+  }
+
+  return (
+    <form className="user-menu-password auth-fields" onSubmit={submit} noValidate>
+      <PasswordInput
+        label="Current password"
+        autoComplete="current-password"
+        value={current}
+        disabled={submitting}
+        onChange={setCurrent}
+      />
+      <PasswordInput
+        label="New password"
+        autoComplete="new-password"
+        value={next}
+        disabled={submitting}
+        error={fieldErrors.password}
+        onChange={setNext}
+      />
+      <PasswordInput
+        label="Confirm new password"
+        autoComplete="new-password"
+        value={confirmation}
+        disabled={submitting}
+        error={fieldErrors.confirmation}
+        onChange={setConfirmation}
+      />
+
+      {message && failed && <div className="form-error" role="alert">{message}</div>}
+
+      <div className="user-menu-password-actions">
+        <button className="primary-button" type="submit" disabled={submitting}>
+          {submitting ? "Saving…" : "Update password"}
+        </button>
+        <button
+          className="link-button"
+          type="button"
+          disabled={submitting}
+          onClick={() => {
+            reset();
+            setMessage(null);
+            setOpen(false);
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/**
+ * A social-only account has no current password to prove, so the password is set
+ * through the emailed reset link rather than a form that could never succeed.
+ */
+function CreatePasswordAction({ email, disabled }: { email: string; disabled: boolean }) {
+  const [message, setMessage] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+
+  async function start() {
+    if (sending) return;
+    setSending(true);
+    setMessage(null);
+
+    const retry = retryAfterCollector();
+    const result = await requestPasswordReset({
+      email,
+      redirectTo: `${window.location.origin}${resetPasswordPath}`,
+      fetchOptions: retry.fetchOptions,
+    });
+
+    setSending(false);
+    setMessage(
+      result.error?.status === 429
+        ? describeAuthError(result.error, retry.state.seconds)
+        : "Check your email for a link to set a password",
+    );
+  }
+
+  return (
+    <div className="user-menu-password">
+      <button className="link-button" type="button" disabled={disabled || sending} onClick={() => void start()}>
+        {sending ? "Sending…" : "Create a password"}
+      </button>
+      <small className="user-menu-hint">
+        Aitar emails a link so the password is set after proving you can read this address
+      </small>
+      {message && <small className="user-menu-hint" role="status">{message}</small>}
     </div>
   );
 }
