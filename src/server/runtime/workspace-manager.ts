@@ -65,7 +65,7 @@ export function chatInternalRef(chatId: string): string {
 export function validateRepositoryUrl(value: string): URL {
   const url = new URL(value);
   if (url.protocol !== "https:" || url.hostname !== "github.com") {
-    throw new Error("Cloud Agents supports HTTPS GitHub repositories only");
+    throw new Error("Aitar supports HTTPS GitHub repositories only");
   }
   if (url.username || url.password) throw new Error("Repository URLs must not contain credentials");
   if (url.pathname.split("/").filter(Boolean).length !== 2) {

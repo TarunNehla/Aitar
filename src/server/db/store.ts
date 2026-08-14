@@ -133,6 +133,15 @@ export async function updateSessionEnvironment(input: {
   return session;
 }
 
+export async function updateSessionTitle(sessionId: string, title: string) {
+  const [session] = await db
+    .update(chatSessions)
+    .set({ title, updatedAt: new Date() })
+    .where(eq(chatSessions.id, sessionId))
+    .returning();
+  return session;
+}
+
 export async function updateSessionHead(sessionId: string, headCommit: string) {
   await db
     .update(chatSessions)

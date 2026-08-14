@@ -41,7 +41,7 @@ function socialProviders(): NonNullable<BetterAuthOptions["socialProviders"]> {
 }
 
 export const auth = betterAuth({
-  appName: "Cloud Agents",
+  appName: "Aitar",
   baseURL: config.APP_URL,
   basePath: "/api/auth",
   secret: config.BETTER_AUTH_SECRET,

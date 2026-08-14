@@ -1,4 +1,6 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface SessionState {
@@ -27,37 +29,71 @@ vi.mock("./auth-client", async () => {
 const repositories = [
   { id: "repository-1", name: "Confidential project", repositoryUrl: "https://github.com/acme/secret", defaultBranch: "main" },
 ];
-const sessions = [
-  {
+const agentBranch = "agent/78a2a00d-4f1e-4c2b-9a55-2b1f0c6d8e37";
+const deepseekModel = "deepseek/deepseek-v4-flash-0731";
+
+function newSession(title = "Private chat title") {
+  return {
     session: {
       id: "session-1",
-      title: "Private chat title",
+      title,
       repositoryId: "repository-1",
-      defaultModel: "test/model",
+      defaultModel: deepseekModel,
       status: "active",
-      branchName: "agent/session-1",
+      branchName: agentBranch,
       baseBranch: "main",
-      baseCommit: null,
-      headCommit: null,
+      baseCommit: "3f9a17c4b2e58d06a1c7f3e9b0d2a4c6e8f01234",
+      headCommit: "7b1d24e8a3c05f96b2d8e1a7c4f60b3d9e520187",
       envStatus: "ready",
+      lastActiveAt: "2026-01-01T00:00:00Z",
     },
     repository: repositories[0],
-  },
-];
+  };
+}
 
+let sessions = [newSession()];
 let sessionMessages: unknown[] = [];
 let sessionPullRequests: unknown[] = [];
 
-vi.mock("./api", () => ({
-  api: vi.fn(async (path: string) => {
-    if (path === "/api/repositories") return { repositories };
-    if (path === "/api/sessions") return { sessions };
-    if (path.startsWith("/api/sessions/")) {
-      return { ...sessions[0], messages: sessionMessages, runs: [], pullRequests: sessionPullRequests };
-    }
-    return {};
-  }),
-}));
+const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
+vi.mock("./api", () => ({ api: apiMock }));
+
+function respond(path: string, options?: RequestInit) {
+  if (path === "/api/repositories") return { repositories };
+  if (path === "/api/sessions") return { sessions };
+  if (options?.method === "PATCH") {
+    const { title } = JSON.parse(String(options.body)) as { title: string };
+    sessions = sessions.map((item) => ({ ...item, session: { ...item.session, title } }));
+    return { session: sessions[0].session };
+  }
+  if (path.endsWith("/messages")) return { message: { id: "message-sent" } };
+  if (path.startsWith("/api/sessions/")) {
+    return { ...sessions[0], messages: sessionMessages, runs: [], pullRequests: sessionPullRequests };
+  }
+  return {};
+}
+
+/** Mirrors the persisted shape of a user turn, whose text carries user visibility. */
+function userMessage(id: string, text: string) {
+  return {
+    id,
+    parentMessageId: null,
+    role: "user",
+    status: "complete",
+    model: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    blocks: [{ id: `block-${id}`, position: 0, type: "text", text, data: {}, visibility: "user" }],
+  };
+}
+
+function sessionCard() {
+  return document.querySelector(".session-button") as HTMLElement;
+}
+
+async function openComposer() {
+  await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+  return document.querySelector(".composer") as HTMLFormElement;
+}
 
 /** Builds the tool-result message shape the runner persists, summary only. */
 function toolMessage(id: string, toolName: string, data: Record<string, unknown>) {
@@ -83,16 +119,24 @@ function toolMessage(id: string, toolName: string, data: Record<string, unknown>
 
 const { App } = await import("./App");
 
+const writeText = vi.fn(async () => {});
+
 beforeEach(() => {
+  sessions = [newSession()];
   sessionMessages = [];
   sessionPullRequests = [];
   sessionState = { data: null, isPending: false };
   signOutMock.mockClear();
+  writeText.mockClear();
+  apiMock.mockReset();
+  apiMock.mockImplementation(async (path: string, options?: RequestInit) => respond(path, options));
+  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   class StubEventSource {
     addEventListener() {}
     close() {}
     onmessage: unknown = null;
     onerror: unknown = null;
+    onopen: unknown = null;
   }
   vi.stubGlobal("EventSource", StubEventSource);
 });
@@ -167,16 +211,16 @@ describe("authenticated application state", () => {
   });
 });
 
-describe("tool rendering", () => {
-  async function openConsole() {
-    sessionState = {
-      data: { user: { id: "user-1", name: "Ada", email: "ada@example.com", image: null } },
-      isPending: false,
-    };
-    render(<App />);
-    await waitFor(() => expect(screen.getByText("Confidential project")).toBeDefined());
-  }
+async function openConsole() {
+  sessionState = {
+    data: { user: { id: "user-1", name: "Ada", email: "ada@example.com", image: null } },
+    isPending: false,
+  };
+  render(<App />);
+  await waitFor(() => expect(screen.getByText("Confidential project")).toBeDefined());
+}
 
+describe("tool rendering", () => {
   it("renders one concise line per tool with muted counts", async () => {
     sessionMessages = [
       toolMessage("call-1", "read", { path: "src/file.ts", lines: 42, bytes: 2_048 }),
@@ -490,5 +534,236 @@ describe("tool rendering", () => {
     expect(screen.queryByText(/Deny/i)).toBeNull();
     expect(screen.queryByText(/approval/i)).toBeNull();
     expect(document.querySelectorAll(".approval-card")).toHaveLength(0);
+  });
+
+  it("shows tool paths relative to the repository", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "read", { path: "/workspace/src/app/globals.css", lines: 12, bytes: 400 }),
+      toolMessage("call-2", "ls", { path: "/workspace", entries: 9 }),
+      toolMessage("call-3", "ls", { path: ".", entries: 4 }),
+      toolMessage("call-4", "write", { path: "/workspace/src/main.tsx", bytes: 120 }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("src/app/globals.css")).toBeDefined());
+    expect(screen.getByText("src/main.tsx")).toBeDefined();
+    expect(screen.getAllByText("repository")).toHaveLength(2);
+    expect(document.body.textContent).not.toContain("/workspace");
+  });
+});
+
+describe("Aitar branding", () => {
+  it("names the product in the sidebar and never says Cloud Agents", async () => {
+    await openConsole();
+
+    expect(document.querySelector(".brand")?.textContent).toBe("Aitar");
+    expect(document.body.textContent).not.toContain("Cloud Agents");
+  });
+
+  it("names the product on the sign-in screen", () => {
+    render(<App />);
+
+    expect(screen.getByText("Aitar")).toBeDefined();
+    expect(document.body.textContent).not.toContain("Cloud Agents");
+  });
+});
+
+describe("conversation header", () => {
+  it("renders no top metadata header above the thread", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    expect(document.querySelector(".conversation-header")).toBeNull();
+    expect(document.querySelector(".conversation > header")).toBeNull();
+    expect(document.querySelector(".run-state")).toBeNull();
+  });
+
+  it("keeps branch, base branch, commit, model id, and Ready out of the conversation", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    const text = document.body.textContent ?? "";
+    expect(text).not.toContain(agentBranch);
+    expect(text).not.toContain("3f9a17c");
+    expect(text).not.toContain("7b1d24e");
+    expect(text).not.toContain(deepseekModel);
+    expect(text).not.toContain("Ready");
+  });
+
+  it("leaves the thread scrollable above the composer", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".messages")).not.toBeNull());
+    const conversation = document.querySelector(".conversation") as HTMLElement;
+    expect(conversation.children[0].classList.contains("messages")).toBe(true);
+  });
+});
+
+describe("session titles", () => {
+  it("titles a new session from the first message and persists it", async () => {
+    sessions = [newSession("New session")];
+    await openConsole();
+
+    const composer = await openComposer();
+    const textarea = composer.querySelector("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "I want to make the background a bluish colour" } });
+    fireEvent.submit(composer);
+
+    await waitFor(() =>
+      expect(sessionCard().textContent).toContain("Make the background a bluish colour"),
+    );
+    expect(sessionCard().textContent).not.toContain("New session");
+
+    const patch = apiMock.mock.calls.find(([, options]) => (options as RequestInit | undefined)?.method === "PATCH");
+    expect(patch?.[0]).toBe("/api/sessions/session-1");
+    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toEqual({
+      title: "Make the background a bluish colour",
+    });
+  });
+
+  it("keeps the derived title after a reload", async () => {
+    sessions = [newSession("New session")];
+    await openConsole();
+
+    const composer = await openComposer();
+    const textarea = composer.querySelector("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "Add retry logic to the upload queue" } });
+    fireEvent.submit(composer);
+    await waitFor(() => expect(sessions[0].session.title).toBe("Add retry logic to the upload queue"));
+
+    cleanup();
+    await openConsole();
+
+    await waitFor(() => expect(sessionCard().textContent).toContain("Add retry logic to the upload queue"));
+  });
+
+  it("derives a title for an existing session still called New session", async () => {
+    sessions = [newSession("New session")];
+    sessionMessages = [userMessage("message-1", "Please fix the flaky checkout test")];
+    await openConsole();
+
+    await waitFor(() => expect(sessionCard().textContent).toContain("Fix the flaky checkout test"));
+    const patch = apiMock.mock.calls.find(([, options]) => (options as RequestInit | undefined)?.method === "PATCH");
+    expect(JSON.parse(String((patch?.[1] as RequestInit).body))).toEqual({
+      title: "Fix the flaky checkout test",
+    });
+  });
+
+  it("leaves an empty message without a derived title", async () => {
+    sessions = [newSession("New session")];
+    sessionMessages = [userMessage("message-1", "   ")];
+    await openConsole();
+
+    await waitFor(() => expect(sessionCard().textContent).toContain("New session"));
+    expect(apiMock.mock.calls.some(([, options]) => (options as RequestInit | undefined)?.method === "PATCH")).toBe(false);
+  });
+});
+
+describe("sidebar chat cards", () => {
+  it("shows only the title and a muted activity time", async () => {
+    await openConsole();
+
+    const card = sessionCard();
+    expect(card.querySelector(".session-name")?.textContent).toBe("Private chat title");
+    expect(card.textContent).not.toContain(agentBranch);
+    expect(card.textContent).not.toContain("agent/");
+    expect(card.textContent).not.toContain("3f9a17c");
+    expect(card.textContent).not.toContain(deepseekModel);
+    expect(card.textContent).not.toContain("session-1");
+    expect(card.querySelector(".session-activity")).not.toBeNull();
+  });
+
+  it("offers the full title as a tooltip and marks the open chat", async () => {
+    await openConsole();
+
+    expect(sessionCard().getAttribute("title")).toBe("Private chat title");
+    expect(sessionCard().getAttribute("aria-current")).toBe("true");
+    expect(sessionCard().classList.contains("selected")).toBe(true);
+  });
+});
+
+describe("composer metadata", () => {
+  it("places a shortened branch below the composer, never in the sidebar", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
+    const branch = document.querySelector(".composer-branch") as HTMLElement;
+    expect(branch.textContent).toBe("agent/78a2a00d…");
+    expect(branch.getAttribute("title")).toBe(agentBranch);
+
+    const composerBox = document.querySelector(".composer-box") as HTMLElement;
+    expect(document.querySelector(".composer")?.contains(branch)).toBe(true);
+    expect(composerBox.compareDocumentPosition(branch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector(".sidebar")?.textContent).not.toContain("agent/");
+  });
+
+  it("copies the complete branch and confirms it", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
+    fireEvent.click(screen.getByLabelText(`Copy branch name ${agentBranch}`));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(agentBranch));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Copied"));
+  });
+
+  it("offers DeepSeek as the only model, labelled for people", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const select = screen.getByLabelText("Model") as HTMLSelectElement;
+    const options = [...select.options];
+
+    expect(options).toHaveLength(1);
+    expect(options[0].textContent).toBe("DeepSeek V4 Flash");
+    expect(options[0].value).toBe(deepseekModel);
+    expect(select.value).toBe(deepseekModel);
+    expect(document.body.textContent).not.toContain(deepseekModel);
+  });
+
+  it("disables a model the session uses that is no longer offered", async () => {
+    sessions = [{ ...newSession(), session: { ...newSession().session, defaultModel: "legacy/model" } }];
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const select = screen.getByLabelText("Model") as HTMLSelectElement;
+
+    expect(select.value).toBe("legacy/model");
+    expect([...select.options].find((option) => option.value === "legacy/model")?.disabled).toBe(true);
+  });
+
+  it("stays quiet when the session is ready and speaks up when it is not", async () => {
+    await openConsole();
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    expect(document.querySelector(".composer-status")).toBeNull();
+
+    cleanup();
+    sessions = [{ ...newSession(), session: { ...newSession().session, envStatus: "preparing" } }];
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer-status")?.textContent).toBe("Preparing"));
+  });
+
+  it("wraps the metadata row instead of scrolling the page sideways", async () => {
+    const stylesheet = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
+    const rule = /\.composer-meta \{[^}]*\}/.exec(stylesheet)?.[0] ?? "";
+
+    expect(rule).toContain("flex-wrap: wrap");
+    expect(rule).toContain("min-width: 0");
+    expect(stylesheet).not.toContain(".conversation-header");
+  });
+});
+
+describe("accessible labels", () => {
+  it("names every control the metadata row and sidebar add", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer-meta")).not.toBeNull());
+    expect(screen.getByLabelText("Model")).toBeDefined();
+    expect(screen.getByLabelText(`Copy branch name ${agentBranch}`)).toBeDefined();
+    expect(screen.getByRole("button", { name: "New session" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "New repository" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "New session in Confidential project" })).toBeDefined();
+    expect(screen.getByRole("status")).toBeDefined();
   });
 });

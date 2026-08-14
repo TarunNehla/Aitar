@@ -119,9 +119,13 @@ button:disabled { cursor: not-allowed; }
 .repository-title button:hover { color: var(--text-strong); background: var(--surface-hover); }
 .repository-title button:active { background: var(--surface-active); }
 
+/* Title and an optional activity time. Branches, commits, and models belong to the
+   composer metadata row, not to a list the user scans. */
 .session-button {
   position: relative;
-  display: block;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-4);
   width: 100%;
   padding: var(--space-5) var(--space-6);
   text-align: left;
@@ -131,11 +135,16 @@ button:disabled { cursor: not-allowed; }
   border-radius: var(--radius-md);
   transition: var(--transition-control);
 }
-.session-button span,
-.session-button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-button span { font: var(--type-ui); }
-.session-button small {
-  margin-top: var(--space-1);
+.session-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-activity {
+  flex: none;
   color: var(--text-faint);
   font: var(--type-metric);
   font-size: var(--text-2xs);
@@ -171,67 +180,17 @@ button:disabled { cursor: not-allowed; }
 
 /* ── Conversation ──────────────────────────────────────────────────────── */
 
+/* No metadata header: the thread starts at the top of the pane and the branch,
+   model, and status sit with the composer instead. */
 .conversation {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
   background: var(--surface-panel);
 }
-.conversation-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-7);
-  min-height: var(--topbar-height);
-  padding: var(--space-5) var(--space-9);
-  border-bottom: 1px solid var(--border-hairline);
-}
-.conversation-title { display: flex; align-items: center; gap: var(--space-5); min-width: 0; }
-.conversation-title h1 {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-strong);
-  font: var(--type-subheading);
-  letter-spacing: var(--tracking-heading);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.repository-link {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  color: var(--text-muted);
-  font: var(--type-ui);
-  font-size: var(--text-xs);
-}
-.repository-link:hover { color: var(--text-link-hover); }
-.branch-label {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex: none;
-  padding: 2px var(--space-3);
-  color: var(--text-body);
-  background: var(--surface-sunken);
-  border-radius: var(--radius-xs);
-  font: var(--type-metric);
-}
-.base-label,
-.model-label { flex: none; color: var(--text-faint); font: var(--type-metric); }
-
-.run-state { display: inline-flex; align-items: center; gap: var(--space-4); flex: none; }
-.run-state span {
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--state-queued-fg);
-}
-.run-state small { color: var(--text-muted); font: var(--type-ui); font-size: var(--text-xs); }
-.run-state.working span { background: var(--state-running-fg); animation: ds-pulse 1.4s var(--ease-in-out) infinite; }
 
 /* ── Thread ────────────────────────────────────────────────────────────── */
 
@@ -554,6 +513,75 @@ button:disabled { cursor: not-allowed; }
 .composer textarea:focus-visible { box-shadow: none; }
 .composer-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-4); }
 .composer-hint { padding-left: var(--space-1); color: var(--text-faint); font: var(--type-caption); }
+
+/* Informative, never competing with the thread: one muted line under the box that
+   wraps rather than widening the composer. */
+.composer-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3) var(--space-6);
+  flex-wrap: wrap;
+  min-width: 0;
+  padding: 0 var(--space-1);
+}
+.composer-meta-item { display: inline-flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.composer-model { margin-left: auto; }
+.composer-meta-label { flex: none; color: var(--text-faint); font: var(--type-caption); }
+.composer-branch {
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px var(--space-3);
+  color: var(--text-body);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-xs);
+  font: var(--type-code);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-button {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--text-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: var(--transition-control);
+}
+.copy-button:hover { color: var(--text-strong); background: var(--surface-hover); }
+.copy-button:active { background: var(--surface-active); }
+.copied-notice { flex: none; color: var(--text-muted); font: var(--type-caption); }
+
+.model-select {
+  max-width: 100%;
+  height: 26px;
+  padding: 0 var(--space-3);
+  color: var(--text-body);
+  background: var(--surface-panel);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font: var(--type-ui);
+  font-size: var(--text-xs);
+  transition: var(--transition-control);
+}
+.model-select:hover { border-color: var(--border-strong); }
+.model-select:disabled { opacity: 0.45; }
+
+.composer-status { display: inline-flex; align-items: center; gap: var(--space-3); flex: none; color: var(--text-muted); font: var(--type-caption); }
+.composer-status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--state-queued-fg);
+}
+.composer-status.working .composer-status-dot { background: var(--state-running-fg); animation: ds-pulse 1.4s var(--ease-in-out) infinite; }
+.composer-status.error { color: var(--text-danger); }
+.composer-status.error .composer-status-dot { background: var(--state-failed-fg); }
 
 .send-button {
   display: grid;
@@ -1181,9 +1209,9 @@ button:disabled { cursor: not-allowed; }
   .sidebar { display: none; }
   .conversation { height: 100dvh; min-height: 0; }
   .messages { padding: var(--space-8) var(--space-7); }
-  .conversation-header { flex-wrap: wrap; gap: var(--space-4); padding: var(--space-5) var(--space-7); }
   .changes-header { flex-wrap: wrap; }
   .composer { margin: 0 var(--space-7) var(--space-7); }
+  .composer-model { margin-left: 0; }
   .onboarding { padding: var(--space-10) var(--space-7); }
   .field-row { grid-template-columns: 1fr; }
   .dialog-overlay { padding: var(--space-7); }

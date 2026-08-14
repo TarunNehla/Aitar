@@ -228,7 +228,7 @@ describe("create_pull_request", () => {
 
   it("refuses a repository that is not connected to the GitHub App", async () => {
     relation = { session: { ...session }, repository: { ...repository, githubInstallationId: null as never } };
-    await expect(request(client())).rejects.toThrow("not connected to the Cloud Agents GitHub App");
+    await expect(request(client())).rejects.toThrow("not connected to the Aitar GitHub App");
   });
 
   it("refuses to publish when the chat has produced no commit", async () => {

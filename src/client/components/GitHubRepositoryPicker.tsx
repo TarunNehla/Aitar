@@ -147,7 +147,7 @@ export function GitHubRepositoryPicker({
 
       {installations.length === 0 && appConfigured && (
         <p className="github-empty">
-          Install the Cloud Agents GitHub App on an account, pick the repositories it may read, and they appear here.
+          Install the Aitar GitHub App on an account, pick the repositories it may read, and they appear here.
         </p>
       )}
 

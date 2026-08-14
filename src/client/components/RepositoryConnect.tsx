@@ -140,7 +140,7 @@ export function RepositoryConnect({
   return (
     <main className="onboarding">
       <div className="onboarding-copy">
-        <p className="eyebrow">Cloud Agents</p>
+        <p className="eyebrow">Aitar</p>
         <h1>Connect a repository</h1>
         <p>The agent works on a branch in your repository and reports back here.</p>
       </div>

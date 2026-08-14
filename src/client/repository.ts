@@ -11,7 +11,7 @@ export function repositoryUrlError(value: string): string | null {
 
   if (url.username || url.password) return "Remove the credentials from the repository URL";
   if (url.protocol !== "https:" || url.hostname !== "github.com") {
-    return "Cloud Agents supports public HTTPS GitHub repositories";
+    return "Aitar supports public HTTPS GitHub repositories";
   }
   if (url.pathname.split("/").filter(Boolean).length !== 2) {
     return "The URL needs an owner and a repository name";
@@ -38,7 +38,7 @@ export function describeSetupError(reason: unknown, baseBranch: string): string 
   const lowered = message.toLowerCase();
 
   if (lowered.includes("could not read username") || lowered.includes("authentication failed")) {
-    return "That repository is private. Cloud Agents can only reach public GitHub repositories";
+    return "That repository is private. Aitar can only reach public GitHub repositories";
   }
   if (lowered.includes("repository not found") || lowered.includes("not found")) {
     return "That repository could not be found. Check the owner and repository name";

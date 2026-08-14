@@ -46,6 +46,7 @@ import {
   markRunCancelling,
   updateRepositoryFetched,
   updateSessionEnvironment,
+  updateSessionTitle,
   type Access,
   type RepositoryRow,
   type SessionRelation,
@@ -73,6 +74,10 @@ const sessionInput = z.object({
   title: z.string().trim().min(1).max(120).default("New session"),
   model: z.string().trim().min(1).optional(),
   baseBranch: z.string().trim().min(1).max(200).optional(),
+});
+
+const sessionTitleInput = z.object({
+  title: z.string().trim().min(1).max(120),
 });
 
 const messageInput = z.object({
@@ -412,6 +417,18 @@ export function createApi() {
         listPullRequests(sessionId),
       ]);
       response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, pullRequests });
+    }),
+  );
+
+  app.patch(
+    "/api/sessions/:sessionId",
+    asyncRoute(async (request, response) => {
+      const input = sessionTitleInput.parse(request.body);
+      const relation = await requireSession(request, response);
+      if (!relation) return;
+
+      const session = await updateSessionTitle(relation.session.id, input.title);
+      response.json({ session });
     }),
   );
 

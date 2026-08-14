@@ -10,6 +10,7 @@ import { RepositoryConnect } from "./components/RepositoryConnect";
 import { SignIn } from "./components/SignIn";
 import { Spinner } from "./components/Spinner";
 import { UserMenu, type SessionUser } from "./components/UserMenu";
+import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
 
 interface Repository {
   id: string;
@@ -30,6 +31,7 @@ interface SessionListItem {
     baseCommit: string | null;
     headCommit: string | null;
     envStatus: string;
+    lastActiveAt?: string;
   };
   repository: Repository;
 }
@@ -88,6 +90,36 @@ const agentStatuses = [
   "Noodling on it…",
 ];
 const agentStatusInterval = 2_400;
+const workspaceRoot = "/workspace";
+const repositoryRootLabel = "repository";
+const branchDisplayLimit = 22;
+const copiedNoticeDuration = 1_600;
+
+/** Frontend-only until models are managed server side. */
+const modelOptions = [{ value: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash" }];
+
+/** Container paths are an implementation detail, so the thread shows repository-relative ones. */
+function repositoryPath(value: string): string {
+  const path = value.startsWith(`${workspaceRoot}/`) ? value.slice(workspaceRoot.length + 1) : value;
+  return path === workspaceRoot || path === "" || path === "." ? repositoryRootLabel : path;
+}
+
+function shortBranchName(branch: string): string {
+  if (branch.length <= branchDisplayLimit) return branch;
+  const separator = branch.lastIndexOf("/");
+  return `${branch.slice(0, separator + 1)}${branch.slice(separator + 1, separator + 9)}…`;
+}
+
+function relativeTime(value: string | undefined): string {
+  const timestamp = value ? new Date(value).getTime() : Number.NaN;
+  if (!Number.isFinite(timestamp)) return "";
+  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h`;
+  const days = Math.floor(minutes / (60 * 24));
+  return days < 7 ? `${days}d` : `${Math.floor(days / 7)}w`;
+}
 
 function messageText(message: MessageView): string {
   return message.blocks
@@ -125,15 +157,23 @@ function toolPresentation(block: MessageView["blocks"][number] | undefined, fail
   if (toolName === "read") {
     return {
       verb: "Read",
-      code: String(data.path ?? "file"),
+      code: repositoryPath(String(data.path ?? "file")),
       detail: joined([countLabel(data.lines, "line"), formatBytes(data.bytes)]),
     };
   }
   if (toolName === "edit") {
-    return { verb: "Edited", code: String(data.path ?? "file"), detail: joined([countLabel(data.edits, "edit")]) };
+    return {
+      verb: "Edited",
+      code: repositoryPath(String(data.path ?? "file")),
+      detail: joined([countLabel(data.edits, "edit")]),
+    };
   }
   if (toolName === "write") {
-    return { verb: "Wrote", code: String(data.path ?? "file"), detail: joined([formatBytes(data.bytes)]) };
+    return {
+      verb: "Wrote",
+      code: repositoryPath(String(data.path ?? "file")),
+      detail: joined([formatBytes(data.bytes)]),
+    };
   }
   if (toolName === "grep") {
     return {
@@ -150,7 +190,11 @@ function toolPresentation(block: MessageView["blocks"][number] | undefined, fail
     };
   }
   if (toolName === "ls") {
-    return { verb: "Listed", code: String(data.path ?? "."), detail: joined([countLabel(data.entries, "entry", "entries")]) };
+    return {
+      verb: "Listed",
+      code: repositoryPath(String(data.path ?? ".")),
+      detail: joined([countLabel(data.entries, "entry", "entries")]),
+    };
   }
   if (toolName === "bash") {
     const durationMs = Number(data.durationMs);
@@ -480,7 +524,7 @@ export function App() {
     clearAuthQueryParameters();
   }, []);
 
-  if (isPending) return <div className="center-state">Opening Cloud Agents…</div>;
+  if (isPending) return <div className="center-state">Opening Aitar…</div>;
   if (!session?.user) return <SignIn error={authQuery.oauthError} />;
 
   return (
@@ -517,7 +561,9 @@ function Console({
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [agentPlaceholder, setAgentPlaceholder] = useState<{ sessionId: string; afterSequence: number } | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [streamDropped, setStreamDropped] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const titledSessionsRef = useRef(new Set<string>());
   const shouldFollowMessagesRef = useRef(true);
   const renderedSessionRef = useRef<string | null>(null);
   const requestedChangesRef = useRef(new Set<string>());
@@ -579,7 +625,9 @@ function Console({
     renderedSessionRef.current = null;
     void loadDetail(selectedId);
 
+    setStreamDropped(false);
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
+    source.onopen = () => setStreamDropped(false);
     source.addEventListener("ready", () => {
       eventReplayReadyRef.current = true;
     });
@@ -645,6 +693,7 @@ function Console({
     };
     source.onerror = () => {
       // EventSource reconnects automatically using the last event ID.
+      setStreamDropped(true);
     };
     return () => source.close();
   }, [selectedId, loadDetail, loadSessions]);
@@ -737,10 +786,45 @@ function Console({
     [sessions, selectedId],
   );
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
+  // A ready session says nothing; only the states worth acting on get a line.
+  const sessionStatus = useMemo(() => {
+    if (!detail) return null;
+    if (detail.session.envStatus === "failed") return { tone: "error", label: "Environment failed" };
+    if (streamDropped) return { tone: "error", label: "Disconnected" };
+    if (detail.session.envStatus !== "ready") return { tone: "working", label: "Preparing" };
+    if (activeRun) return { tone: "working", label: sentenceCase(activeRun.status) };
+    return null;
+  }, [activeRun, detail, streamDropped]);
   const pullRequestsByNumber = useMemo(
     () => Object.fromEntries((detail?.pullRequests ?? []).map((entry) => [entry.number, entry])),
     [detail?.pullRequests],
   );
+
+  /** V0 titles come from the first user message, so no extra model call is needed. */
+  const titleFromFirstMessage = useCallback((sessionId: string, text: string) => {
+    if (titledSessionsRef.current.has(sessionId)) return;
+    const title = deriveSessionTitle(text);
+    if (title === defaultSessionTitle) return;
+
+    titledSessionsRef.current.add(sessionId);
+    setSessions((current) =>
+      current.map((item) =>
+        item.session.id === sessionId ? { ...item, session: { ...item.session, title } } : item,
+      ),
+    );
+    setDetail((current) =>
+      current?.session.id === sessionId ? { ...current, session: { ...current.session, title } } : current,
+    );
+    void api(`/api/sessions/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title }) }).catch(() => {
+      titledSessionsRef.current.delete(sessionId);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!detail || detail.session.title !== defaultSessionTitle) return;
+    const first = detail.messages.find((message) => message.role === "user");
+    if (first) titleFromFirstMessage(detail.session.id, messageText(first));
+  }, [detail, titleFromFirstMessage]);
 
   const openSession = useCallback(async (sessionId: string) => {
     await Promise.all([loadRepositories(), loadSessions()]);
@@ -758,7 +842,7 @@ function Console({
     ? "GitHub installation connected. Pick a repository to start"
     : null;
 
-  if (loading) return <div className="center-state">Opening Cloud Agents…</div>;
+  if (loading) return <div className="center-state">Opening Aitar…</div>;
 
   if (repositories.length === 0) {
     return (
@@ -777,7 +861,7 @@ function Console({
         {/* No brand mark exists for this product — the name is set in plain type. */}
         <div className="brand">
           <span className="brand-placeholder" />
-          <strong>Cloud Agents</strong>
+          <strong>Aitar</strong>
         </div>
 
         <div className="session-list ds-scroll">
@@ -795,7 +879,7 @@ function Console({
                       {
                         method: "POST",
                         body: JSON.stringify({
-                          title: "New session",
+                          title: defaultSessionTitle,
                           baseBranch: group.repository.defaultBranch,
                         }),
                       },
@@ -807,16 +891,21 @@ function Console({
                   <Icon name="plus" size={14} />
                 </button>
               </div>
-              {group.sessions.map((item) => (
-                <button
-                  className={`session-button ${item.session.id === selectedId ? "selected" : ""}`}
-                  key={item.session.id}
-                  onClick={() => setSelectedId(item.session.id)}
-                >
-                  <span>{item.session.title}</span>
-                  <small>{item.session.branchName}</small>
-                </button>
-              ))}
+              {group.sessions.map((item) => {
+                const activity = relativeTime(item.session.lastActiveAt);
+                return (
+                  <button
+                    className={`session-button ${item.session.id === selectedId ? "selected" : ""}`}
+                    key={item.session.id}
+                    title={item.session.title}
+                    aria-current={item.session.id === selectedId}
+                    onClick={() => setSelectedId(item.session.id)}
+                  >
+                    <span className="session-name">{item.session.title}</span>
+                    {activity && <small className="session-activity">{activity}</small>}
+                  </button>
+                );
+              })}
             </div>
           ))}
         </div>
@@ -831,7 +920,7 @@ function Console({
                   {
                     method: "POST",
                     body: JSON.stringify({
-                      title: "New session",
+                      title: defaultSessionTitle,
                       model: selectedItem.session.defaultModel,
                       baseBranch: selectedItem.repository.defaultBranch,
                     }),
@@ -890,35 +979,6 @@ function Console({
 
         {sessionView === "ready" && detail && (
           <>
-            <header className="conversation-header">
-              <div className="conversation-title">
-                <h1>{detail.session.title}</h1>
-                <a
-                  className="repository-link"
-                  href={detail.repository.repositoryUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {detail.repository.name}
-                  <Icon name="external-link" size={14} />
-                </a>
-                <code className="branch-label">
-                  <Icon name="git-branch" size={14} />
-                  {detail.session.branchName}
-                </code>
-                {detail.session.baseCommit && (
-                  <span className="base-label">
-                    {detail.session.baseBranch} · {detail.session.baseCommit.slice(0, 7)}
-                  </span>
-                )}
-                <span className="model-label">{detail.session.defaultModel}</span>
-              </div>
-              <div className={`run-state ${activeRun ? "working" : "ready"}`}>
-                <span />
-                <small>{activeRun ? sentenceCase(activeRun.status) : "Ready"}</small>
-              </div>
-            </header>
-
             <div
               className="messages ds-scroll"
               ref={messagesRef}
@@ -1005,12 +1065,16 @@ function Console({
 
             <Composer
               working={Boolean(activeRun)}
+              branchName={detail.session.branchName}
+              model={detail.session.defaultModel}
+              status={sessionStatus}
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
               onSend={async (text) => {
                 const sessionId = detail.session.id;
                 const pendingId = crypto.randomUUID();
                 setError(null);
                 shouldFollowMessagesRef.current = true;
+                if (detail.session.title === defaultSessionTitle) titleFromFirstMessage(sessionId, text);
                 setPendingMessages((current) => [
                   ...current,
                   { id: pendingId, sessionId, text, messageId: null },
@@ -1259,12 +1323,70 @@ function MarkdownText({ children }: { children: string }) {
   );
 }
 
+function BranchChip({ branchName }: { branchName: string }) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), copiedNoticeDuration);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
+  return (
+    <div className="composer-meta-item">
+      <span className="composer-meta-label">Branch</span>
+      <code className="composer-branch" title={branchName}>{shortBranchName(branchName)}</code>
+      <button
+        className="copy-button"
+        type="button"
+        aria-label={`Copy branch name ${branchName}`}
+        onClick={async () => {
+          await navigator.clipboard.writeText(branchName);
+          setCopied(true);
+        }}
+      >
+        <Icon name={copied ? "check" : "copy"} size={14} />
+      </button>
+      <span className="copied-notice" role="status" aria-live="polite">{copied ? "Copied" : ""}</span>
+    </div>
+  );
+}
+
+/** One option today, but a real select so the list can grow without a redesign. */
+function ModelSelect({ model }: { model: string }) {
+  const [selected, setSelected] = useState(model);
+  const known = modelOptions.some((option) => option.value === selected);
+
+  return (
+    <div className="composer-meta-item composer-model">
+      <label className="composer-meta-label" htmlFor="composer-model">Model</label>
+      <select
+        className="model-select"
+        id="composer-model"
+        value={selected}
+        onChange={(event) => setSelected(event.target.value)}
+      >
+        {!known && <option value={selected} disabled>{selected}</option>}
+        {modelOptions.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function Composer({
   working,
+  branchName,
+  model,
+  status,
   onSend,
   onCancel,
 }: {
   working: boolean;
+  branchName: string;
+  model: string;
+  status: { tone: string; label: string } | null;
   onSend: (text: string) => Promise<void>;
   onCancel?: () => Promise<unknown>;
 }) {
@@ -1318,6 +1440,18 @@ function Composer({
           </button>
         </div>
       </div>
+
+      <div className="composer-meta">
+        <BranchChip branchName={branchName} key={branchName} />
+        {status && (
+          <span className={`composer-status ${status.tone}`}>
+            <span className="composer-status-dot" />
+            {status.label}
+          </span>
+        )}
+        <ModelSelect model={model} key={model} />
+      </div>
+
       <small className="composer-hint">Enter to send · Shift + Enter for a new line</small>
     </form>
   );
@@ -1365,7 +1499,7 @@ function TimelineEvent({
   } else if (event.type === "file_changed") {
     icon = "file-diff";
     verb = "Edited";
-    code = String(event.payload.path ?? "");
+    code = event.payload.path ? repositoryPath(String(event.payload.path)) : "";
   } else if (event.type === "checkpoint_saved") {
     icon = "layers";
     verb = "Saved checkpoint";

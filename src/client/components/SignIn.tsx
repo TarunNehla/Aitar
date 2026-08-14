@@ -22,7 +22,7 @@ export function SignIn({ error }: { error?: string | null }) {
   return (
     <main className="onboarding">
       <div className="onboarding-copy">
-        <p className="eyebrow">Cloud Agents</p>
+        <p className="eyebrow">Aitar</p>
         <h1>Sign in to continue</h1>
         <p>Your repositories, chats, and checkpoints stay private to your account.</p>
       </div>
@@ -45,7 +45,7 @@ export function SignIn({ error }: { error?: string | null }) {
 
         {message && <div className="form-error">{message}</div>}
 
-        <small>Cloud Agents only reads your name, email, and avatar from these providers</small>
+        <small>Aitar only reads your name, email, and avatar from these providers</small>
       </div>
     </main>
   );

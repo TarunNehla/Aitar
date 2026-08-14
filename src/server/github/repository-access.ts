@@ -84,7 +84,7 @@ export async function withRepositoryPullRequestAccess<T>(
 ): Promise<T> {
   const userId = input.userId ?? input.repository.ownerUserId;
   if (!input.repository.githubInstallationId || !userId) {
-    throw new Error("This repository is not connected to the Cloud Agents GitHub App");
+    throw new Error("This repository is not connected to the Aitar GitHub App");
   }
   if (!input.repository.githubFullName) {
     throw new Error("This repository is missing its GitHub owner and name");
