@@ -389,6 +389,33 @@ button:disabled { cursor: not-allowed; }
   font-size: var(--text-xs);
 }
 
+/* A screenshot is the result of the call, not detail hidden behind it, so it sits
+   under its row instead of inside a details element. */
+.tool-screenshot {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.screenshot-thumb {
+  justify-self: start;
+  max-width: 280px;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-card);
+  cursor: pointer;
+  transition: box-shadow var(--dur-fast) var(--ease-out);
+}
+.screenshot-thumb:hover { box-shadow: var(--shadow-sm); }
+.screenshot-thumb img { display: block; width: 100%; height: auto; }
+.screenshot-viewer { display: grid; justify-items: start; min-width: 0; }
+.screenshot-viewer img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+}
+
 .tool-message { min-width: 0; }
 .tool-message > summary {
   display: flex;

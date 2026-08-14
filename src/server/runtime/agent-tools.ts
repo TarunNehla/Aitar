@@ -7,7 +7,9 @@ import {
   createReadTool,
   createWriteTool,
 } from "@earendil-works/pi-coding-agent";
+import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { createBrowserTools } from "./browser-tools.js";
 import type { EventWriter } from "./event-writer.js";
 import { createPullRequestForChat } from "./pull-request.js";
 import { effectiveTimeoutSeconds, platformTimeoutSeconds, runSandboxCommand } from "./sandbox-command.js";
@@ -21,6 +23,7 @@ export interface ToolContext {
   sessionId: string;
   runId: string;
   writer: EventWriter;
+  supportsImages?: boolean;
 }
 
 type ToolResult = Awaited<ReturnType<AgentTool["execute"]>>;
@@ -322,5 +325,28 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     },
   };
 
-  return [read, edit, write, grep, find, list, bash, startProcess, processLogs, stopProcess, createPullRequest];
+  const browser = config.BROWSER_ENABLED
+    ? createBrowserTools({
+        chatId: context.chatId,
+        repositoryPath: context.repositoryPath,
+        runId: context.runId,
+        supportsImages: Boolean(context.supportsImages),
+        writer: context.writer,
+      })
+    : [];
+
+  return [
+    read,
+    edit,
+    write,
+    grep,
+    find,
+    list,
+    bash,
+    startProcess,
+    processLogs,
+    stopProcess,
+    createPullRequest,
+    ...browser,
+  ];
 }

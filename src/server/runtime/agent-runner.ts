@@ -34,7 +34,21 @@ import { workspaceManager } from "./workspace-manager.js";
 import { persistedToolSummary, safeToolArguments } from "./output-policy.js";
 
 /** Tools whose calls are worth replaying after a reload, so they reach Postgres as summaries. */
-const durableTools = new Set(["bash", "write", "edit", "start_process", "stop_process", "create_pull_request"]);
+const durableTools = new Set([
+  "bash",
+  "write",
+  "edit",
+  "start_process",
+  "stop_process",
+  "create_pull_request",
+  "browser_navigate",
+  "browser_click",
+  "browser_type",
+  "browser_select",
+  "browser_press",
+  "browser_screenshot",
+  "browser_close",
+]);
 
 const systemPrompt = [
   "You are a coding agent working inside an isolated container for one repository checkout.",
@@ -46,6 +60,17 @@ const systemPrompt = [
   "- bash runs a shell command from /workspace. The container has outbound internet access, so installs and network requests work without asking.",
   "- start_process, process_logs, and stop_process manage long-running commands such as dev servers. Never start those with bash.",
   "- create_pull_request publishes this chat's branch and opens the pull request. It is the only way to push.",
+  "- browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_press, browser_scroll, browser_wait, browser_screenshot, browser_console, and browser_close drive a real Chromium browser for this chat. Use them to run the application, navigate the interface, test user flows, read console errors, capture screenshots, and confirm visual results.",
+  "",
+  "Browser rules:",
+  "- Start the application with start_process, then wait for the server to report that it is listening before opening it.",
+  "- An application you intend to check in the browser must listen on 0.0.0.0 rather than only on 127.0.0.1, because the browser runs beside the container rather than inside it.",
+  "- Still pass ordinary localhost URLs such as http://localhost:3000 to browser_navigate. The platform routes them to this chat.",
+  "- Use the browser tools rather than curl whenever you are verifying a user interface.",
+  "- Call browser_snapshot before clicking or typing, and act on the references it returns instead of guessed selectors or coordinates.",
+  "- Read browser_console when a page misbehaves, and capture a browser_screenshot after a visual change.",
+  "- Call browser_close once the browser is no longer needed.",
+  "- Skip the browser entirely for work that does not affect a user interface.",
   "",
   "Working rules:",
   "- Make focused changes that satisfy the request, then verify them by running the project's tests or checks.",
@@ -353,18 +378,20 @@ export class AgentWorker {
 
       const branch = await getActiveBranchMessages(run.session_id);
       const history = branch.map(toPiMessage).filter((message): message is AgentMessage => Boolean(message));
+      const model = modelFor(run.model);
       const tools = createAgentTools({
         chatId: relation.session.id,
         repositoryPath,
         sessionId: run.session_id,
         runId: run.id,
         writer,
+        supportsImages: model.input.includes("image"),
       });
 
       const agent = new Agent({
         initialState: {
           systemPrompt,
-          model: modelFor(run.model),
+          model,
           thinkingLevel: "medium",
           tools,
           messages: history,

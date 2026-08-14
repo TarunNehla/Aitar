@@ -9,6 +9,8 @@ import { config } from "./config.js";
 import { errorForLog, logger } from "./logger.js";
 import { ensureAskpassHelper } from "./runtime/git-credentials.js";
 import { environmentReaper } from "./runtime/environment-reaper.js";
+import { browserSidecar } from "./runtime/browser-sidecar.js";
+import { browserSessions } from "./runtime/browser-session.js";
 
 const app = createApi();
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
@@ -22,8 +24,10 @@ if (config.NODE_ENV === "production" && existsSync(clientDirectory)) {
 const server = app.listen(config.PORT, () => {
   void ensureAskpassHelper()
     .then(() => agentWorker.start())
+    .then(() => browserSidecar.sweepOrphans())
     .then(() => {
       environmentReaper.start();
+      browserSessions.startIdleReaper();
       logger.info(
         {
           port: config.PORT,
@@ -50,6 +54,7 @@ async function shutdown(reason: string, exitCode = 0) {
   logger.info({ reason }, "Backend shutdown started");
   agentWorker.stop();
   environmentReaper.stop();
+  browserSessions.stopIdleReaper();
   server.close();
   try {
     await closeDatabase();

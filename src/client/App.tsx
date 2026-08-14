@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
 import { api } from "./api";
 import { clearAuthQueryParameters, readAuthQueryParameters, useSession } from "./auth-client";
+import { Dialog } from "./components/Dialog";
 import { Icon, type IconName } from "./components/Icon";
 import { RepositoryConnect } from "./components/RepositoryConnect";
 import { SignIn } from "./components/SignIn";
@@ -178,7 +179,116 @@ function toolPresentation(block: MessageView["blocks"][number] | undefined, fail
   if (toolName === "stop_process") {
     return { verb: "Stopped", code: String(data.name ?? "process"), detail: status };
   }
+  if (toolName.startsWith("browser_")) {
+    return browserPresentation(toolName, data, failed, joined, status);
+  }
   return { verb: toolLabel(toolName), code: "", detail: status };
+}
+
+function quoted(value: unknown, fallback: string): string {
+  const text = String(value ?? "").trim();
+  return text ? `“${text}”` : fallback;
+}
+
+function dimensions(data: Record<string, unknown>): string | null {
+  const width = Number(data.width);
+  const height = Number(data.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return `${width} × ${height}`;
+}
+
+/** Element labels are page content, so they stay in the verb; only URLs and keys earn a mono chip. */
+function browserPresentation(
+  toolName: string,
+  data: Record<string, unknown>,
+  failed: boolean,
+  joined: (parts: Array<string | null>) => string,
+  status: string,
+) {
+  const durationMs = Number(data.durationMs);
+  const duration = Number.isFinite(durationMs) ? `${(durationMs / 1_000).toFixed(1)}s` : null;
+
+  if (toolName === "browser_navigate") {
+    return {
+      verb: failed ? "Could not open" : "Opened",
+      code: String(data.url ?? ""),
+      detail: joined([
+        String(data.title ?? "") || null,
+        data.timedOut ? "timed out" : null,
+        duration,
+      ]),
+    };
+  }
+  if (toolName === "browser_snapshot") {
+    return { verb: "Read page structure", code: "", detail: joined([countLabel(data.elements, "element")]) };
+  }
+  if (toolName === "browser_click") {
+    return {
+      verb: `${failed ? "Could not click" : "Clicked"} ${quoted(data.label, "an element")}`,
+      code: "",
+      detail: joined([data.navigated ? "navigated" : null, duration]),
+    };
+  }
+  if (toolName === "browser_type") {
+    return {
+      verb: `${failed ? "Could not type into" : "Typed into"} ${quoted(data.label, "a field")}`,
+      code: "",
+      detail: joined([countLabel(data.characters, "character"), duration]),
+    };
+  }
+  if (toolName === "browser_select") {
+    const values = Array.isArray(data.values) ? data.values : [];
+    return {
+      verb: `Selected ${values.length > 0 ? values.map((value) => quoted(value, "")).join(", ") : "an option"}`,
+      code: "",
+      detail: joined([duration]),
+    };
+  }
+  if (toolName === "browser_press") {
+    return { verb: "Pressed", code: String(data.key ?? "a key"), detail: joined([duration]) };
+  }
+  if (toolName === "browser_scroll") {
+    return { verb: `Scrolled ${String(data.direction ?? "")}`.trim(), code: "", detail: status };
+  }
+  if (toolName === "browser_wait") {
+    return { verb: "Waited for the page", code: "", detail: joined([duration]) };
+  }
+  if (toolName === "browser_screenshot") {
+    return {
+      verb: failed ? "Could not capture screenshot" : "Captured screenshot",
+      code: "",
+      detail: joined([dimensions(data), formatBytes(data.bytes)]),
+    };
+  }
+  if (toolName === "browser_console") {
+    const errors = Number(data.errors);
+    const verb = Number.isFinite(errors) && errors > 0
+      ? `Read ${errors} console ${errors === 1 ? "error" : "errors"}`
+      : "Read console";
+    return { verb, code: "", detail: joined([countLabel(data.messages, "message")]) };
+  }
+  if (toolName === "browser_close") {
+    return { verb: "Closed browser", code: "", detail: status };
+  }
+  return { verb: toolLabel(toolName), code: "", detail: status };
+}
+
+const browserIcons: Record<string, IconName> = {
+  browser_navigate: "globe",
+  browser_snapshot: "layers",
+  browser_click: "mouse-pointer-click",
+  browser_type: "keyboard",
+  browser_select: "keyboard",
+  browser_press: "keyboard",
+  browser_scroll: "layers",
+  browser_wait: "clock",
+  browser_screenshot: "camera",
+  browser_console: "terminal",
+  browser_close: "x",
+};
+
+function toolIcon(toolName: string): IconName {
+  return browserIcons[toolName] ?? "terminal";
 }
 
 function sentenceCase(value: string): string {
@@ -829,6 +939,7 @@ function Console({
                   <Message
                     key={node.item.id}
                     message={node.item.message}
+                    sessionId={detail.session.id}
                     pullRequests={pullRequestsByNumber}
                     processOutput={processOutput}
                   />
@@ -928,12 +1039,44 @@ function Console({
   );
 }
 
+/** The screenshot is the result, so it shows. A details wrapper would hide the only content. */
+function ScreenshotThumbnail({
+  sessionId,
+  artifactId,
+  url,
+}: {
+  sessionId: string;
+  artifactId: string;
+  url: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const source = `/api/sessions/${sessionId}/artifacts/${artifactId}`;
+  const description = url ? `Screenshot of ${url}` : "Screenshot of the page";
+
+  return (
+    <>
+      <button className="screenshot-thumb" type="button" onClick={() => setOpen(true)}>
+        <img src={source} alt={description} loading="lazy" />
+      </button>
+      {open && (
+        <Dialog title="Screenshot" description={url || undefined} onClose={() => setOpen(false)}>
+          <div className="screenshot-viewer">
+            <img src={source} alt={description} />
+          </div>
+        </Dialog>
+      )}
+    </>
+  );
+}
+
 function Message({
   message,
+  sessionId,
   pullRequests,
   processOutput,
 }: {
   message: MessageView;
+  sessionId: string;
   pullRequests?: Record<number, PullRequestSummary>;
   processOutput?: Record<string, string>;
 }) {
@@ -962,7 +1105,7 @@ function Message({
     const line = (
       <>
         <span className="tool-icon">
-          <Icon name={failed ? "alert-triangle" : "terminal"} size={14} />
+          <Icon name={failed ? "alert-triangle" : toolIcon(toolName)} size={14} />
         </span>
         <span className="timeline-event-verb">{presentation.verb}</span>
         {presentation.code && (
@@ -986,6 +1129,20 @@ function Message({
           </summary>
           <pre>{output}</pre>
         </details>
+      );
+    }
+
+    const artifactId = toolName === "browser_screenshot" ? String(block?.data.artifactId ?? "") : "";
+    if (artifactId && !failed) {
+      return (
+        <div className="tool-screenshot">
+          <div className="tool-result">{line}</div>
+          <ScreenshotThumbnail
+            sessionId={sessionId}
+            artifactId={artifactId}
+            url={String(block?.data.url ?? "")}
+          />
+        </div>
       );
     }
 

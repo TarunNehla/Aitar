@@ -32,6 +32,7 @@ import {
   finishRun,
   getActiveBranchMessages,
   getActiveRunForSession,
+  getArtifactForUser,
   getCheckpointForSession,
   getLatestCheckpointForSession,
   getRepositoryForUser,
@@ -458,6 +459,29 @@ export function createApi() {
       const patch = await workspaceManager.patch(location.repository, baseCommit, checkpointCommit);
       response.setHeader("Content-Disposition", 'attachment; filename="changes.patch"');
       response.type("text/x-diff").send(patch);
+    }),
+  );
+
+  app.get(
+    "/api/sessions/:sessionId/artifacts/:artifactId",
+    asyncRoute(async (request, response) => {
+      const relation = await requireSession(request, response);
+      if (!relation) return;
+
+      const access = await getArtifactForUser(routeParam(request, "artifactId"), authenticatedUser(request).id);
+      const artifact = resolveAccess(access, response, "Artifact not found");
+      if (!artifact) return;
+      if (artifact.sessionId !== relation.session.id) {
+        response.status(404).json({ error: "Artifact not found" });
+        return;
+      }
+
+      response.type(artifact.mimeType ?? "application/octet-stream");
+      response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+      response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      response.sendFile(artifact.storagePath, (error) => {
+        if (error && !response.headersSent) response.status(404).json({ error: "Artifact not found" });
+      });
     }),
   );
 

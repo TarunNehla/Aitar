@@ -774,6 +774,7 @@ export async function listPullRequests(sessionId: string) {
 }
 
 export async function saveArtifact(input: {
+  id?: string;
   sessionId: string;
   runId?: string;
   messageId?: string;

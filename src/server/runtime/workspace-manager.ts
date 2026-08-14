@@ -3,6 +3,7 @@ import { dirname, join, relative } from "node:path";
 import type { CodeChanges, FileChangeStatus } from "../../shared/contracts.js";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { browserSessions } from "./browser-session.js";
 import { baseGitEnvironment } from "./git-credentials.js";
 import { runChecked } from "./process.js";
 import { sandbox } from "./sandbox.js";
@@ -312,6 +313,7 @@ export class WorkspaceManager {
       if (error instanceof Error && error.message === "Chat checkout has uncheckpointed changes") throw error;
     }
     await processManager.stopAll(input.chatId);
+    await browserSessions.close(input.chatId);
     await sandbox.removeContainer(input.chatId);
     await rm(location.root, { recursive: true, force: true });
   }

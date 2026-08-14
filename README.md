@@ -21,6 +21,7 @@ Docker isolates repository commands.
 - Live assistant, tool, command, and file events through SSE.
 - A standard tool set built on the `@earendil-works/pi-coding-agent` factories: `read`, `edit`, `write`, `grep`, `find`, `ls`, `bash`.
 - `start_process`, `process_logs`, and `stop_process` for dev servers and watchers.
+- `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_select`, `browser_press`, `browser_scroll`, `browser_wait`, `browser_screenshot`, `browser_console`, and `browser_close` drive a real Chromium browser in a per-chat sidecar started on first use.
 - `create_pull_request`, the only path that pushes to GitHub, running entirely on the backend.
 - Every agent file operation and command runs inside the chat's container, with the repository at `/workspace`.
 - Docker CPU, memory, process, capability, disk, and time limits applied as invisible platform boundaries.
@@ -36,6 +37,7 @@ Docker isolates repository commands.
 - Node.js 22 or newer.
 - pnpm.
 - Docker. The `SANDBOX_IMAGE` needs a POSIX shell, coreutils, GNU grep, and find. The default `node:22-bookworm` has all of them.
+- The browser image, built once with `./scripts/build-browser-image.sh`, if browser tools are enabled.
 - A Neon Postgres database.
 - An OpenRouter API key.
 
@@ -78,6 +80,24 @@ pnpm dev
 ```
 
 Open `http://localhost:5173`.
+
+## Browser tools
+
+The agent drives a real Chromium browser to run the application, navigate the interface, test user flows, read console errors, and capture screenshots.
+
+Build the browser image once. Chats never download a browser.
+
+```sh
+./scripts/build-browser-image.sh
+```
+
+Nothing runs until the agent calls a browser tool. The first call creates a private Docker network for the chat, attaches the chat container to it under the `workspace` alias, starts the sidecar, and launches Chromium. A chat that never browses uses no browser memory or CPU.
+
+The sidecar is removed after `BROWSER_IDLE_MINUTES` of browser inactivity, when the agent calls `browser_close`, when the chat environment is evicted, and on backend startup for anything a previous process left behind.
+
+An application the agent intends to open must listen on `0.0.0.0`, because the browser runs beside the chat container rather than inside it. The agent still passes ordinary `http://localhost:3000` URLs; the backend routes them.
+
+Screenshots appear inline in the chat as thumbnails and open full size through an authenticated route. They survive the sidecar. Set `BROWSER_ENABLED=false` to remove the browser tools entirely.
 
 ## Model routing
 
@@ -325,3 +345,23 @@ Containers have outbound internet through the default bridge network. Host netwo
 Docker with a bind mount is a useful V0 boundary, but it is not a hostile multi-tenant security boundary.
 
 Use gVisor or microVM isolation before allowing untrusted public users.
+
+### Browser sidecar
+
+The browser sidecar runs as a non-root user with all Linux capabilities dropped, `no-new-privileges`, a read-only root filesystem, tmpfs for `/tmp` and the home directory, a private IPC namespace, and its own memory, CPU, and PID limits.
+
+It has no repository mount, no host mount, no Docker socket, no database credentials, no OpenRouter key, no GitHub credentials, and no user tokens.
+
+The Chromium sandbox stays enabled. `docker/browser/seccomp.json` is Docker's default seccomp profile plus the `clone`, `unshare`, and `chroot` syscalls Chromium's user-namespace sandbox needs, so no capability has to be added back. Without that profile Chromium cannot create a user namespace and the sandbox would have to be turned off.
+
+Each browser-enabled chat gets its own private Docker network. Docker's inter-network isolation keeps a chat's browser away from every other chat's container. The browser reaches the chat's application through the `workspace` alias, so the application must listen on `0.0.0.0`.
+
+Navigation to `localhost` or `127.0.0.1` is rewritten to that alias. The chat keeps the original URL.
+
+Cloud metadata endpoints, the host gateway, loopback, and private address ranges are refused before navigation and again inside the sidecar, where the hostname is resolved and every returned address is checked. That second check is what makes a public hostname pointing at a private address fail. The browser still reaches the public internet.
+
+The Playwright protocol is never exposed. The sidecar runs a small controller with a fixed set of actions, so the backend sends intents rather than browser automation code. There is no tool for evaluating arbitrary JavaScript. The controller port is published only on the loopback interface and every request carries a random per-sidecar token that never reaches the agent, the frontend, the logs, or the database.
+
+Page HTML, accessibility snapshots, cookies, storage, console text, and typed values are never persisted. Typed text is recorded as `[REDACTED]` with a character count whenever it is marked sensitive, typed into a password field, typed into a field whose name reads as a secret, or shaped like a token.
+
+Screenshots are written to `WORKSPACE_ROOT/artifacts/<chatId>` outside the repository checkout, so they never enter Git. Postgres stores only metadata. They are served through an authenticated, chat-scoped route.

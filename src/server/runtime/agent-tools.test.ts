@@ -166,6 +166,17 @@ describe("agent tool schemas", () => {
       "process_logs",
       "stop_process",
       "create_pull_request",
+      "browser_navigate",
+      "browser_snapshot",
+      "browser_click",
+      "browser_type",
+      "browser_select",
+      "browser_press",
+      "browser_scroll",
+      "browser_wait",
+      "browser_screenshot",
+      "browser_console",
+      "browser_close",
     ]);
   });
 

@@ -1,5 +1,8 @@
 const METADATA_PREVIEW_LIMIT = 500;
 const PATTERN_PREVIEW_LIMIT = 200;
+const URL_PREVIEW_LIMIT = 300;
+const REFERENCE_PREVIEW_LIMIT = 60;
+const ELEMENT_LABEL_LIMIT = 120;
 
 function metadataPreview(value: unknown, maximumCharacters = METADATA_PREVIEW_LIMIT): string {
   const text = String(value ?? "").trim();
@@ -37,6 +40,34 @@ export function safeCommandPreview(value: unknown): string {
     )
     .replace(/(authorization\s*:\s*(?:bearer|basic)\s+)[^\s"']+/gi, "$1[REDACTED]")
     .replace(/\b(gh[pousr]|github_pat)_[A-Za-z0-9_]{10,}/g, "[REDACTED]");
+}
+
+const URL_SECRET_KEYS =
+  /(?:token|secret|password|passwd|credential|api[-_]?key|auth|session|sig|signature|code|assertion)/i;
+
+/**
+ * A page URL reaches the chat and the event log, so anything a login flow or an
+ * OAuth redirect parks in the query string or the fragment is stripped first.
+ */
+export function safeUrlPreview(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return metadataPreview(safeCommandPreview(raw), URL_PREVIEW_LIMIT);
+  }
+
+  if (parsed.username || parsed.password) {
+    parsed.username = "";
+    parsed.password = "";
+  }
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (URL_SECRET_KEYS.test(key)) parsed.searchParams.set(key, "[REDACTED]");
+  }
+  if (parsed.hash && URL_SECRET_KEYS.test(parsed.hash)) parsed.hash = "#[REDACTED]";
+  return metadataPreview(parsed.toString(), URL_PREVIEW_LIMIT);
 }
 
 /**
@@ -112,6 +143,63 @@ export function safeToolArguments(toolName: string, value: unknown): Record<stri
   if (toolName === "create_pull_request") {
     return { title: metadataPreview(args.title, 240), draft: Boolean(args.draft) };
   }
+
+  if (toolName === "browser_navigate") {
+    return {
+      url: safeUrlPreview(args.url),
+      ...(args.waitUntil === undefined ? {} : { waitUntil: metadataPreview(args.waitUntil, 20) }),
+      ...(args.timeout === undefined ? {} : { timeout: optionalNumber(args.timeout) }),
+    };
+  }
+  if (toolName === "browser_snapshot" || toolName === "browser_close") {
+    return {};
+  }
+  if (toolName === "browser_click") {
+    return { ref: metadataPreview(args.ref, REFERENCE_PREVIEW_LIMIT) };
+  }
+  if (toolName === "browser_type") {
+    // Typed text is a password as often as not, so only its shape is recorded.
+    return {
+      ref: metadataPreview(args.ref, REFERENCE_PREVIEW_LIMIT),
+      characters: typeof args.text === "string" ? args.text.length : 0,
+      clear: Boolean(args.clear),
+      submit: Boolean(args.submit),
+      sensitive: Boolean(args.sensitive),
+    };
+  }
+  if (toolName === "browser_select") {
+    return {
+      ref: metadataPreview(args.ref, REFERENCE_PREVIEW_LIMIT),
+      values: Array.isArray(args.values) ? args.values.length : 0,
+    };
+  }
+  if (toolName === "browser_press") {
+    return { key: metadataPreview(args.key, 40) };
+  }
+  if (toolName === "browser_scroll") {
+    return {
+      direction: metadataPreview(args.direction, 10),
+      ...(args.amount === undefined ? {} : { amount: optionalNumber(args.amount) }),
+    };
+  }
+  if (toolName === "browser_wait") {
+    return {
+      ...(args.ref === undefined ? {} : { ref: metadataPreview(args.ref, REFERENCE_PREVIEW_LIMIT) }),
+      ...(args.text === undefined ? {} : { text: metadataPreview(args.text, ELEMENT_LABEL_LIMIT) }),
+      ...(args.timeout === undefined ? {} : { timeout: optionalNumber(args.timeout) }),
+    };
+  }
+  if (toolName === "browser_screenshot") {
+    return { fullPage: Boolean(args.fullPage) };
+  }
+  if (toolName === "browser_console") {
+    return {
+      ...(args.cursor === undefined ? {} : { cursor: metadataPreview(args.cursor, REFERENCE_PREVIEW_LIMIT) }),
+      ...(args.level === undefined ? {} : { level: metadataPreview(args.level, 10) }),
+      ...(args.limit === undefined ? {} : { limit: optionalNumber(args.limit) }),
+    };
+  }
+
   return {};
 }
 
@@ -280,5 +368,148 @@ export function persistedToolSummary(input: {
     };
   }
 
+  if (input.toolName.startsWith("browser_")) {
+    return browserSummary(input.toolName, status, details, args);
+  }
+
   return { text: `${input.toolName.replaceAll("_", " ")} ${status}.`, data: {} };
+}
+
+/**
+ * Page structure, console text, and typed values stay in the sidecar. Only the
+ * action, its target, and its measurements are durable.
+ */
+function browserSummary(
+  toolName: string,
+  status: string,
+  details: Record<string, unknown>,
+  args: Record<string, unknown>,
+): { text: string; data: Record<string, unknown> } {
+  const durationMs = optionalNumber(details.durationMs);
+  const label = metadataPreview(details.label, ELEMENT_LABEL_LIMIT);
+  const url = safeUrlPreview(details.url ?? args.url);
+
+  if (toolName === "browser_navigate") {
+    const title = metadataPreview(details.title, ELEMENT_LABEL_LIMIT);
+    const httpStatus = details.status === null ? null : optionalNumber(details.status);
+    return {
+      text: `Opened ${url || "a page"}${title ? ` (${title})` : ""}. Page content was not stored.`,
+      data: {
+        url,
+        title,
+        status: httpStatus ?? null,
+        ...(durationMs === undefined ? {} : { durationMs }),
+        timedOut: Boolean(details.timedOut),
+      },
+    };
+  }
+
+  if (toolName === "browser_snapshot") {
+    const elements = optionalNumber(details.elements);
+    return {
+      text: `Read the page structure${measurements([
+        elements === undefined ? null : `${elements.toLocaleString()} elements`,
+      ])}. The page snapshot was not stored.`,
+      data: { url, ...(elements === undefined ? {} : { elements }), truncated: Boolean(details.truncated) },
+    };
+  }
+
+  if (toolName === "browser_click") {
+    return {
+      text: `Clicked “${label || "an element"}”${measurements([
+        details.navigated ? "navigated" : null,
+      ])}.`,
+      data: { label, url, navigated: Boolean(details.navigated), ...(durationMs === undefined ? {} : { durationMs }) },
+    };
+  }
+
+  if (toolName === "browser_type") {
+    const characters = optionalNumber(details.characters ?? args.characters) ?? 0;
+    return {
+      text: `Typed [REDACTED] into “${label || "a field"}” (${characters} ${characters === 1 ? "character" : "characters"}). The typed value was not stored.`,
+      data: {
+        label,
+        characters,
+        redacted: true,
+        submit: Boolean(details.submit ?? args.submit),
+        navigated: Boolean(details.navigated),
+        ...(durationMs === undefined ? {} : { durationMs }),
+      },
+    };
+  }
+
+  if (toolName === "browser_select") {
+    const values = Array.isArray(details.values) ? details.values.map((value) => metadataPreview(value, 60)) : [];
+    return {
+      text: `Selected ${values.length > 0 ? values.map((value) => `“${value}”`).join(", ") : "an option"} in “${label || "a field"}”.`,
+      data: { label, values, ...(durationMs === undefined ? {} : { durationMs }) },
+    };
+  }
+
+  if (toolName === "browser_press") {
+    const key = metadataPreview(details.key ?? args.key, 40);
+    return {
+      text: `Pressed ${key || "a key"}.`,
+      data: { key, navigated: Boolean(details.navigated), ...(durationMs === undefined ? {} : { durationMs }) },
+    };
+  }
+
+  if (toolName === "browser_scroll") {
+    const direction = metadataPreview(details.direction ?? args.direction, 10);
+    return {
+      text: `Scrolled ${direction || "the page"}.`,
+      data: { direction, x: optionalNumber(details.x), y: optionalNumber(details.y) },
+    };
+  }
+
+  if (toolName === "browser_wait") {
+    return {
+      text: `Waited for the page${measurements([durationMs === undefined ? null : `${(durationMs / 1_000).toFixed(1)}s`])}.`,
+      data: { matched: metadataPreview(details.matched, 20), ...(durationMs === undefined ? {} : { durationMs }) },
+    };
+  }
+
+  if (toolName === "browser_screenshot") {
+    const width = optionalNumber(details.width);
+    const height = optionalNumber(details.height);
+    const bytes = optionalNumber(details.bytes);
+    return {
+      text: `Captured a screenshot of ${url || "the page"}${measurements([
+        width === undefined || height === undefined ? null : `${width}×${height}`,
+        byteLabel(bytes),
+      ])}. The image is stored as an artifact, not in the database.`,
+      data: {
+        artifactId: metadataPreview(details.artifactId, 64),
+        url,
+        ...(width === undefined ? {} : { width }),
+        ...(height === undefined ? {} : { height }),
+        ...(bytes === undefined ? {} : { bytes }),
+        fullPage: Boolean(details.fullPage),
+        truncated: Boolean(details.truncated),
+      },
+    };
+  }
+
+  if (toolName === "browser_console") {
+    const messages = optionalNumber(details.messages);
+    const errors = optionalNumber(details.errors);
+    return {
+      text: `Read the browser console${measurements([
+        messages === undefined ? null : `${messages.toLocaleString()} messages`,
+        errors === undefined ? null : `${errors.toLocaleString()} errors`,
+      ])}. Console text was not stored.`,
+      data: {
+        ...(messages === undefined ? {} : { messages }),
+        ...(errors === undefined ? {} : { errors }),
+        nextCursor: metadataPreview(details.nextCursor, 64),
+        remaining: optionalNumber(details.remaining),
+      },
+    };
+  }
+
+  if (toolName === "browser_close") {
+    return { text: "Closed the browser.", data: { closed: Boolean(details.closed) } };
+  }
+
+  return { text: `${toolName.replaceAll("_", " ")} ${status}.`, data: {} };
 }

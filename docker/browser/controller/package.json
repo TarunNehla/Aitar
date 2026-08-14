@@ -1,0 +1,14 @@
+{
+  "name": "aitar-browser-controller",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Persistent Playwright controller for the Aitar browser sidecar",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

@@ -257,6 +257,101 @@ describe("tool rendering", () => {
     expect(card.textContent).toContain("main");
   });
 
+  it("renders one concise line per browser action", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_navigate", {
+        url: "http://localhost:3000",
+        title: "Sign in",
+        status: 200,
+        durationMs: 1_200,
+      }),
+      toolMessage("call-2", "browser_snapshot", { elements: 12 }),
+      toolMessage("call-3", "browser_click", { label: "Sign in", navigated: true, durationMs: 300 }),
+      toolMessage("call-4", "browser_type", { label: "Email", characters: 18, redacted: true, durationMs: 100 }),
+      toolMessage("call-5", "browser_select", { label: "Country", values: ["India"] }),
+      toolMessage("call-6", "browser_press", { key: "Enter" }),
+      toolMessage("call-7", "browser_console", { messages: 8, errors: 3 }),
+      toolMessage("call-8", "browser_close", { closed: true }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Opened")).toBeDefined());
+    expect(screen.getByText("http://localhost:3000")).toBeDefined();
+    expect(screen.getByText("Read page structure")).toBeDefined();
+    expect(screen.getByText("Clicked “Sign in”")).toBeDefined();
+    expect(screen.getByText("Typed into “Email”")).toBeDefined();
+    expect(screen.getByText("Selected “India”")).toBeDefined();
+    expect(screen.getByText("Pressed")).toBeDefined();
+    expect(screen.getByText("Enter")).toBeDefined();
+    expect(screen.getByText("Read 3 console errors")).toBeDefined();
+    expect(screen.getByText("Closed browser")).toBeDefined();
+    expect(screen.getByText("18 characters · 0.1s")).toBeDefined();
+  });
+
+  it("never shows a typed value, only that something was typed", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_type", { label: "Password", characters: 7, redacted: true }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Typed into “Password”")).toBeDefined());
+    expect(document.body.textContent).not.toContain("hunter2");
+  });
+
+  it("renders a screenshot as a thumbnail served by the authenticated artifact route", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_screenshot", {
+        artifactId: "artifact-1",
+        url: "http://localhost:3000/",
+        width: 1280,
+        height: 800,
+        bytes: 188_416,
+      }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Captured screenshot")).toBeDefined());
+    expect(screen.getByText("1280 × 800 · 184.0 KB")).toBeDefined();
+
+    const image = document.querySelector(".screenshot-thumb img") as HTMLImageElement;
+    expect(image.getAttribute("src")).toBe("/api/sessions/session-1/artifacts/artifact-1");
+    expect(image.getAttribute("src")).not.toContain("/Users");
+    expect(document.querySelectorAll("details.tool-message")).toHaveLength(0);
+  });
+
+  it("shows a browser failure as a failed row", async () => {
+    sessionMessages = [
+      {
+        ...toolMessage("call-1", "browser_navigate", { url: "http://localhost:3000" }),
+        blocks: [
+          {
+            id: "block-call-1",
+            position: 0,
+            type: "tool_result",
+            text: "summary",
+            data: { callId: "call-1", toolName: "browser_navigate", isError: true, url: "http://localhost:3000" },
+            visibility: "model",
+          },
+        ],
+      },
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Could not open")).toBeDefined());
+    expect(document.querySelectorAll(".tool-result.failed")).toHaveLength(1);
+  });
+
+  it("has no separate browser activity panel", async () => {
+    sessionMessages = [
+      toolMessage("call-1", "browser_navigate", { url: "http://localhost:3000", title: "Sign in" }),
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Opened")).toBeDefined());
+    expect(document.querySelectorAll(".browser-panel, .activity-panel, [data-browser-panel]")).toHaveLength(0);
+    expect(document.querySelectorAll(".tool-result")).toHaveLength(1);
+  });
+
   it("has no approval controls anywhere in the console", async () => {
     sessionMessages = [toolMessage("call-1", "bash", { command: "pnpm add left-pad", exitCode: 0, durationMs: 900 })];
     await openConsole();
