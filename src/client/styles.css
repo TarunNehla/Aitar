@@ -511,65 +511,50 @@ button:disabled { cursor: not-allowed; }
 /* The box carries the focus ring, so the textarea must not paint its own on top
    of it — see the global :focus-visible rule in design-system/tokens/base.css. */
 .composer textarea:focus-visible { box-shadow: none; }
-.composer-actions { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-4); }
-.composer-hint { padding-left: var(--space-1); color: var(--text-faint); font: var(--type-caption); }
-
-/* Informative, never competing with the thread: one muted line under the box that
-   wraps rather than widening the composer. */
-.composer-meta {
+/* Context sits inside the box with the send control, so the composer stays one
+   object: what the message runs against on the left, what acts on it on the right. */
+.composer-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-3) var(--space-6);
+  gap: var(--space-3) var(--space-4);
   flex-wrap: wrap;
   min-width: 0;
-  padding: 0 var(--space-1);
 }
-.composer-meta-item { display: inline-flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.composer-model { margin-left: auto; }
-.composer-meta-label { flex: none; color: var(--text-faint); font: var(--type-caption); }
+.composer-actions-start { display: flex; align-items: center; gap: var(--space-5); flex: 1 1 auto; min-width: 0; }
+.composer-actions-end { display: flex; align-items: center; gap: var(--space-4); flex: none; margin-left: auto; }
+
 .composer-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
   min-width: 0;
-  overflow: hidden;
-  padding: 2px var(--space-3);
-  color: var(--text-body);
-  background: var(--surface-sunken);
-  border-radius: var(--radius-xs);
+  max-width: 240px;
+  color: var(--text-faint);
   font: var(--type-code);
   font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.copy-button {
-  display: grid;
-  place-items: center;
-  flex: none;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  color: var(--text-faint);
+.composer-branch svg { flex: none; }
+.composer-branch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.model-select { position: relative; display: inline-flex; align-items: center; min-width: 0; }
+.model-select select {
+  appearance: none;
+  max-width: 190px;
+  height: 26px;
+  padding: 0 calc(var(--space-4) + 14px) 0 var(--space-4);
+  color: var(--text-muted);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
-  transition: var(--transition-control);
-}
-.copy-button:hover { color: var(--text-strong); background: var(--surface-hover); }
-.copy-button:active { background: var(--surface-active); }
-.copied-notice { flex: none; color: var(--text-muted); font: var(--type-caption); }
-
-.model-select {
-  max-width: 100%;
-  height: 26px;
-  padding: 0 var(--space-3);
-  color: var(--text-body);
-  background: var(--surface-panel);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  outline: 0;
   font: var(--type-ui);
   font-size: var(--text-xs);
+  text-overflow: ellipsis;
   transition: var(--transition-control);
 }
-.model-select:hover { border-color: var(--border-strong); }
-.model-select:disabled { opacity: 0.45; }
+.model-select select:hover { color: var(--text-strong); background: var(--surface-hover); }
+.model-select select:disabled { opacity: 0.45; }
+.model-select > svg { position: absolute; right: var(--space-3); color: var(--text-faint); pointer-events: none; }
 
 .composer-status { display: inline-flex; align-items: center; gap: var(--space-3); flex: none; color: var(--text-muted); font: var(--type-caption); }
 .composer-status-dot {
@@ -1211,7 +1196,7 @@ button:disabled { cursor: not-allowed; }
   .messages { padding: var(--space-8) var(--space-7); }
   .changes-header { flex-wrap: wrap; }
   .composer { margin: 0 var(--space-7) var(--space-7); }
-  .composer-model { margin-left: 0; }
+  .composer-branch { max-width: 150px; }
   .onboarding { padding: var(--space-10) var(--space-7); }
   .field-row { grid-template-columns: 1fr; }
   .dialog-overlay { padding: var(--space-7); }

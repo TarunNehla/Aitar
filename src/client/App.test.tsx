@@ -119,18 +119,14 @@ function toolMessage(id: string, toolName: string, data: Record<string, unknown>
 
 const { App } = await import("./App");
 
-const writeText = vi.fn(async () => {});
-
 beforeEach(() => {
   sessions = [newSession()];
   sessionMessages = [];
   sessionPullRequests = [];
   sessionState = { data: null, isPending: false };
   signOutMock.mockClear();
-  writeText.mockClear();
   apiMock.mockReset();
   apiMock.mockImplementation(async (path: string, options?: RequestInit) => respond(path, options));
-  Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
   class StubEventSource {
     addEventListener() {}
     close() {}
@@ -683,28 +679,37 @@ describe("sidebar chat cards", () => {
 });
 
 describe("composer metadata", () => {
-  it("places a shortened branch below the composer, never in the sidebar", async () => {
+  it("puts a shortened branch inside the composer box, never in the sidebar", async () => {
     await openConsole();
 
     await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
     const branch = document.querySelector(".composer-branch") as HTMLElement;
+    const textarea = document.querySelector(".composer textarea") as HTMLTextAreaElement;
+
     expect(branch.textContent).toBe("agent/78a2a00d…");
     expect(branch.getAttribute("title")).toBe(agentBranch);
-
-    const composerBox = document.querySelector(".composer-box") as HTMLElement;
-    expect(document.querySelector(".composer")?.contains(branch)).toBe(true);
-    expect(composerBox.compareDocumentPosition(branch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector(".composer-box")?.contains(branch)).toBe(true);
+    expect(textarea.compareDocumentPosition(branch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(document.querySelector(".sidebar")?.textContent).not.toContain("agent/");
   });
 
-  it("copies the complete branch and confirms it", async () => {
+  it("carries no copy control beside the branch", async () => {
     await openConsole();
 
     await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
-    fireEvent.click(screen.getByLabelText(`Copy branch name ${agentBranch}`));
+    expect(document.querySelector(".copy-button")).toBeNull();
+    expect(screen.queryByLabelText(/copy/i)).toBeNull();
+  });
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(agentBranch));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Copied"));
+  it("puts the model dropdown in the composer box with no visible label", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const select = screen.getByLabelText("Model");
+
+    expect(document.querySelector(".composer-box")?.contains(select)).toBe(true);
+    expect(document.querySelector(".composer-actions-end")?.contains(select)).toBe(true);
+    expect(document.querySelector(".composer")?.textContent).not.toContain("Model");
   });
 
   it("offers DeepSeek as the only model, labelled for people", async () => {
@@ -744,9 +749,9 @@ describe("composer metadata", () => {
     await waitFor(() => expect(document.querySelector(".composer-status")?.textContent).toBe("Preparing"));
   });
 
-  it("wraps the metadata row instead of scrolling the page sideways", async () => {
+  it("wraps the action row instead of scrolling the page sideways", async () => {
     const stylesheet = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
-    const rule = /\.composer-meta \{[^}]*\}/.exec(stylesheet)?.[0] ?? "";
+    const rule = /\.composer-actions \{[^}]*\}/.exec(stylesheet)?.[0] ?? "";
 
     expect(rule).toContain("flex-wrap: wrap");
     expect(rule).toContain("min-width: 0");
@@ -755,15 +760,14 @@ describe("composer metadata", () => {
 });
 
 describe("accessible labels", () => {
-  it("names every control the metadata row and sidebar add", async () => {
+  it("names every control the composer and sidebar add", async () => {
     await openConsole();
 
-    await waitFor(() => expect(document.querySelector(".composer-meta")).not.toBeNull());
+    await waitFor(() => expect(document.querySelector(".composer-actions")).not.toBeNull());
     expect(screen.getByLabelText("Model")).toBeDefined();
-    expect(screen.getByLabelText(`Copy branch name ${agentBranch}`)).toBeDefined();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDefined();
     expect(screen.getByRole("button", { name: "New session" })).toBeDefined();
     expect(screen.getByRole("button", { name: "New repository" })).toBeDefined();
     expect(screen.getByRole("button", { name: "New session in Confidential project" })).toBeDefined();
-    expect(screen.getByRole("status")).toBeDefined();
   });
 });

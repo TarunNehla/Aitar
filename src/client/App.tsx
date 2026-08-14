@@ -93,7 +93,6 @@ const agentStatusInterval = 2_400;
 const workspaceRoot = "/workspace";
 const repositoryRootLabel = "repository";
 const branchDisplayLimit = 22;
-const copiedNoticeDuration = 1_600;
 
 /** Frontend-only until models are managed server side. */
 const modelOptions = [{ value: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash" }];
@@ -1324,31 +1323,11 @@ function MarkdownText({ children }: { children: string }) {
 }
 
 function BranchChip({ branchName }: { branchName: string }) {
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), copiedNoticeDuration);
-    return () => clearTimeout(timer);
-  }, [copied]);
-
   return (
-    <div className="composer-meta-item">
-      <span className="composer-meta-label">Branch</span>
-      <code className="composer-branch" title={branchName}>{shortBranchName(branchName)}</code>
-      <button
-        className="copy-button"
-        type="button"
-        aria-label={`Copy branch name ${branchName}`}
-        onClick={async () => {
-          await navigator.clipboard.writeText(branchName);
-          setCopied(true);
-        }}
-      >
-        <Icon name={copied ? "check" : "copy"} size={14} />
-      </button>
-      <span className="copied-notice" role="status" aria-live="polite">{copied ? "Copied" : ""}</span>
-    </div>
+    <span className="composer-branch" title={branchName}>
+      <Icon name="git-branch" size={14} />
+      <span>{shortBranchName(branchName)}</span>
+    </span>
   );
 }
 
@@ -1358,11 +1337,9 @@ function ModelSelect({ model }: { model: string }) {
   const known = modelOptions.some((option) => option.value === selected);
 
   return (
-    <div className="composer-meta-item composer-model">
-      <label className="composer-meta-label" htmlFor="composer-model">Model</label>
+    <div className="model-select">
       <select
-        className="model-select"
-        id="composer-model"
+        aria-label="Model"
         value={selected}
         onChange={(event) => setSelected(event.target.value)}
       >
@@ -1371,6 +1348,7 @@ function ModelSelect({ model }: { model: string }) {
           <option key={option.value} value={option.value}>{option.label}</option>
         ))}
       </select>
+      <Icon name="chevron-down" size={14} />
     </div>
   );
 }
@@ -1424,35 +1402,34 @@ function Composer({
           rows={2}
         />
         <div className="composer-actions">
-          {onCancel && (
-            <button className="cancel-button" type="button" onClick={() => void onCancel()}>
-              <Icon name="square" size={14} />
-              Stop
+          <div className="composer-actions-start">
+            <BranchChip branchName={branchName} />
+            {status && (
+              <span className={`composer-status ${status.tone}`}>
+                <span className="composer-status-dot" />
+                {status.label}
+              </span>
+            )}
+          </div>
+          <div className="composer-actions-end">
+            <ModelSelect model={model} key={model} />
+            {onCancel && (
+              <button className="cancel-button" type="button" onClick={() => void onCancel()}>
+                <Icon name="square" size={14} />
+                Stop
+              </button>
+            )}
+            <button
+              className="send-button"
+              type="submit"
+              aria-label="Send message"
+              disabled={!text.trim() || sending}
+            >
+              <Icon name="arrow-up" size={16} />
             </button>
-          )}
-          <button
-            className="send-button"
-            type="submit"
-            aria-label="Send message"
-            disabled={!text.trim() || sending}
-          >
-            <Icon name="arrow-up" size={16} />
-          </button>
+          </div>
         </div>
       </div>
-
-      <div className="composer-meta">
-        <BranchChip branchName={branchName} key={branchName} />
-        {status && (
-          <span className={`composer-status ${status.tone}`}>
-            <span className="composer-status-dot" />
-            {status.label}
-          </span>
-        )}
-        <ModelSelect model={model} key={model} />
-      </div>
-
-      <small className="composer-hint">Enter to send · Shift + Enter for a new line</small>
     </form>
   );
 }
