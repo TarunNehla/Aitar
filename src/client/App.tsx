@@ -572,7 +572,6 @@ function Console({
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const [agentPlaceholder, setAgentPlaceholder] = useState<{ sessionId: string; afterSequence: number } | null>(null);
   const [setupOpen, setSetupOpen] = useState(false);
-  const [streamDropped, setStreamDropped] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const titledSessionsRef = useRef(new Set<string>());
   const shouldFollowMessagesRef = useRef(true);
@@ -636,9 +635,7 @@ function Console({
     renderedSessionRef.current = null;
     void loadDetail(selectedId);
 
-    setStreamDropped(false);
     const source = new EventSource(`/api/sessions/${selectedId}/events`);
-    source.onopen = () => setStreamDropped(false);
     source.addEventListener("ready", () => {
       eventReplayReadyRef.current = true;
     });
@@ -701,10 +698,6 @@ function Console({
         void loadDetail(selectedId, true);
         void loadSessions();
       }
-    };
-    source.onerror = () => {
-      // EventSource reconnects automatically using the last event ID.
-      setStreamDropped(true);
     };
     return () => source.close();
   }, [selectedId, loadDetail, loadSessions]);
@@ -797,15 +790,6 @@ function Console({
     [sessions, selectedId],
   );
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
-  // A ready session says nothing, and neither does one whose environment has not been needed yet.
-  const sessionStatus = useMemo(() => {
-    if (!detail) return null;
-    if (detail.session.envStatus === "failed") return { tone: "error", label: "Environment failed" };
-    if (streamDropped) return { tone: "error", label: "Disconnected" };
-    if (!["ready", "idle"].includes(detail.session.envStatus)) return { tone: "working", label: "Preparing" };
-    if (activeRun) return { tone: "working", label: sentenceCase(activeRun.status) };
-    return null;
-  }, [activeRun, detail, streamDropped]);
   const pullRequestsByNumber = useMemo(
     () => Object.fromEntries((detail?.pullRequests ?? []).map((entry) => [entry.number, entry])),
     [detail?.pullRequests],
@@ -1068,7 +1052,6 @@ function Console({
             <Composer
               working={Boolean(activeRun)}
               model={detail.session.defaultModel}
-              status={sessionStatus}
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
               onSend={async (text) => {
                 const sessionId = detail.session.id;
@@ -1338,22 +1321,31 @@ function ModelSelect({ model }: { model: string }) {
 function Composer({
   working,
   model,
-  status,
   onSend,
   onCancel,
 }: {
   working: boolean;
   model: string;
-  status: { tone: string; label: string } | null;
   onSend: (text: string) => Promise<void>;
   onCancel?: () => Promise<unknown>;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const draft = text.trim();
+  // One control: stop while a run is in flight, but typing turns it back into send so
+  // guidance can still go out mid-run.
+  const stopping = working && Boolean(onCancel) && !draft;
+
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${input.scrollHeight}px`;
+  }, [text]);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const draft = text.trim();
     if (!draft || sending) return;
     setSending(true);
     setText("");
@@ -1370,6 +1362,7 @@ function Composer({
     <form className="composer" onSubmit={submit}>
       <div className="composer-box">
         <textarea
+          ref={inputRef}
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
@@ -1379,34 +1372,19 @@ function Composer({
             }
           }}
           placeholder={working ? "Send guidance while the agent works…" : "Describe the change you want…"}
-          rows={2}
+          rows={1}
         />
         <div className="composer-actions">
-          <div className="composer-actions-start">
-            {status && (
-              <span className={`composer-status ${status.tone}`}>
-                <span className="composer-status-dot" />
-                {status.label}
-              </span>
-            )}
-          </div>
-          <div className="composer-actions-end">
-            <ModelSelect model={model} key={model} />
-            {onCancel && (
-              <button className="cancel-button" type="button" onClick={() => void onCancel()}>
-                <Icon name="square" size={14} />
-                Stop
-              </button>
-            )}
-            <button
-              className="send-button"
-              type="submit"
-              aria-label="Send message"
-              disabled={!text.trim() || sending}
-            >
-              <Icon name="arrow-up" size={16} />
-            </button>
-          </div>
+          <ModelSelect model={model} key={model} />
+          <button
+            className="send-button"
+            type={stopping ? "button" : "submit"}
+            aria-label={stopping ? "Stop agent" : "Send message"}
+            disabled={!stopping && (!draft || sending)}
+            onClick={stopping ? () => void onCancel?.() : undefined}
+          >
+            <Icon name={stopping ? "square" : "arrow-up"} size={16} />
+          </button>
         </div>
       </div>
     </form>

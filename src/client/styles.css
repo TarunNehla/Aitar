@@ -514,8 +514,8 @@ button:disabled { cursor: not-allowed; }
 }
 .composer-box {
   display: grid;
-  gap: var(--space-5);
-  padding: var(--space-6);
+  gap: var(--space-3);
+  padding: var(--space-5) var(--space-5) var(--space-4);
   background: var(--surface-panel);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-card);
@@ -523,9 +523,12 @@ button:disabled { cursor: not-allowed; }
   transition: var(--transition-control);
 }
 .composer-box:focus-within { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
+/* The height is set from scrollHeight as the draft grows; this caps it at five body
+   lines (14px × 1.62) and lets the rest scroll. */
 .composer textarea {
   width: 100%;
-  min-height: 48px;
+  max-height: 114px;
+  overflow-y: auto;
   resize: none;
   color: var(--text-strong);
   background: transparent;
@@ -537,17 +540,15 @@ button:disabled { cursor: not-allowed; }
 /* The box carries the focus ring, so the textarea must not paint its own on top
    of it — see the global :focus-visible rule in design-system/tokens/base.css. */
 .composer textarea:focus-visible { box-shadow: none; }
-/* Context sits inside the box with the send control, so the composer stays one
-   object: what the message runs against on the left, what acts on it on the right. */
+/* The model and the send control sit inside the box, so the composer stays one object. */
 .composer-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--space-3) var(--space-4);
   flex-wrap: wrap;
   min-width: 0;
 }
-.composer-actions-start { display: flex; align-items: center; gap: var(--space-5); flex: 1 1 auto; min-width: 0; }
-.composer-actions-end { display: flex; align-items: center; gap: var(--space-4); flex: none; margin-left: auto; }
 
 .model-select { position: relative; display: inline-flex; align-items: center; min-width: 0; }
 .model-select select {
@@ -569,18 +570,6 @@ button:disabled { cursor: not-allowed; }
 .model-select select:disabled { opacity: 0.45; }
 .model-select > svg { position: absolute; right: var(--space-3); color: var(--text-faint); pointer-events: none; }
 
-.composer-status { display: inline-flex; align-items: center; gap: var(--space-3); flex: none; color: var(--text-muted); font: var(--type-caption); }
-.composer-status-dot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--state-queued-fg);
-}
-.composer-status.working .composer-status-dot { background: var(--state-running-fg); animation: ds-pulse 1.4s var(--ease-in-out) infinite; }
-.composer-status.error { color: var(--text-danger); }
-.composer-status.error .composer-status-dot { background: var(--state-failed-fg); }
-
 .send-button {
   display: grid;
   place-items: center;
@@ -595,23 +584,6 @@ button:disabled { cursor: not-allowed; }
 .send-button:hover:not(:disabled) { background: var(--action-primary-hover); }
 .send-button:active:not(:disabled) { background: var(--action-primary-press); transform: scale(0.985); }
 .send-button:disabled { color: var(--text-faint); background: var(--gray-150); }
-
-.cancel-button {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  height: 30px;
-  padding: 0 var(--space-5);
-  color: var(--text-danger);
-  background: var(--surface-panel);
-  border: 1px solid var(--red-100);
-  border-radius: var(--radius-control);
-  font: var(--type-ui);
-  font-size: var(--text-xs);
-  transition: var(--transition-control);
-}
-.cancel-button:hover { background: var(--red-50); }
-.cancel-button:active { background: var(--red-100); transform: scale(0.985); }
 
 /* ── Code changes ──────────────────────────────────────────────────────── */
 

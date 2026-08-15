@@ -58,6 +58,7 @@ function newSession(title = "Private chat title") {
 let sessions = [newSession()];
 let sessionMessages: unknown[] = [];
 let sessionPullRequests: unknown[] = [];
+let sessionRuns: unknown[] = [];
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
 vi.mock("./api", () => ({ api: apiMock }));
@@ -73,7 +74,7 @@ function respond(path: string, options?: RequestInit) {
   if (path.endsWith("/messages")) return { message: { id: "message-sent" } };
   if (path.endsWith("/chats")) return { session: { id: "created-session" } };
   if (path.startsWith("/api/sessions/")) {
-    return { ...sessions[0], messages: sessionMessages, runs: [], pullRequests: sessionPullRequests };
+    return { ...sessions[0], messages: sessionMessages, runs: sessionRuns, pullRequests: sessionPullRequests };
   }
   return {};
 }
@@ -129,6 +130,7 @@ beforeEach(() => {
   sessions = [newSession()];
   sessionMessages = [];
   sessionPullRequests = [];
+  sessionRuns = [];
   sessionState = { data: null, isPending: false };
   authMethods = { emailPassword: true };
   signOutMock.mockClear();
@@ -763,7 +765,7 @@ describe("composer metadata", () => {
     const select = screen.getByLabelText("Model");
 
     expect(document.querySelector(".composer-box")?.contains(select)).toBe(true);
-    expect(document.querySelector(".composer-actions-end")?.contains(select)).toBe(true);
+    expect(document.querySelector(".composer-actions")?.contains(select)).toBe(true);
     expect(document.querySelector(".composer")?.textContent).not.toContain("Model");
   });
 
@@ -792,22 +794,54 @@ describe("composer metadata", () => {
     expect([...select.options].find((option) => option.value === "legacy/model")?.disabled).toBe(true);
   });
 
-  it("stays quiet when the session is ready and speaks up when it is not", async () => {
-    await openConsole();
-    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
-    expect(document.querySelector(".composer-status")).toBeNull();
+  it("never puts a status line in the box, whatever the environment is doing", async () => {
+    for (const envStatus of ["ready", "idle", "preparing", "failed"]) {
+      cleanup();
+      sessions = [{ ...newSession(), session: { ...newSession().session, envStatus } }];
+      await openConsole();
 
-    cleanup();
-    sessions = [{ ...newSession(), session: { ...newSession().session, envStatus: "idle" } }];
-    await openConsole();
-    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
-    expect(document.querySelector(".composer-status")).toBeNull();
+      await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+      expect(document.querySelector(".composer-status"), envStatus).toBeNull();
+      expect(document.querySelector(".composer")?.textContent, envStatus).not.toContain("Preparing");
+    }
+  });
 
-    cleanup();
-    sessions = [{ ...newSession(), session: { ...newSession().session, envStatus: "preparing" } }];
-    await openConsole();
+  it("grows the draft up to five lines and no further", async () => {
+    const stylesheet = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
+    const rule = /\.composer textarea \{[^}]*\}/.exec(stylesheet)?.[0] ?? "";
 
-    await waitFor(() => expect(document.querySelector(".composer-status")?.textContent).toBe("Preparing"));
+    expect(rule).toContain("max-height: 114px");
+    expect(rule).toContain("overflow-y: auto");
+    expect(rule).not.toContain("min-height");
+
+    await openConsole();
+    const composer = await openComposer();
+
+    expect((composer.querySelector("textarea") as HTMLTextAreaElement).rows).toBe(1);
+  });
+
+  it("turns the send control into stop while a run is in flight", async () => {
+    sessionRuns = [
+      { id: "run-1", status: "running", model: deepseekModel, costUsd: 0, inputTokens: 0, outputTokens: 0 },
+    ];
+    await openConsole();
+    const composer = await openComposer();
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Stop agent" })).not.toBeNull());
+    expect(composer.querySelectorAll("button")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Stop agent" }));
+    await waitFor(() =>
+      expect(apiMock.mock.calls.some(([path]) => path === "/api/runs/run-1/cancel")).toBe(true),
+    );
+
+    // A draft turns it back into send, so guidance can still go out mid-run.
+    const textarea = composer.querySelector("textarea") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "try the other approach" } });
+
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Stop agent" })).toBeNull();
   });
 
   it("wraps the action row instead of scrolling the page sideways", async () => {
