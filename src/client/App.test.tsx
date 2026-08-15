@@ -1008,6 +1008,104 @@ describe("streamed agent replies", () => {
   });
 });
 
+describe("context compaction", () => {
+  async function streamCompaction() {
+    sessionMessages = [userMessage("message-1", "Fix the header")];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    await openComposer();
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+    return stream;
+  }
+
+  it("announces the pause while the agent is shortening its own context", async () => {
+    const stream = await streamCompaction();
+
+    act(() =>
+      stream.emit(1, "compaction_started", {
+        reason: "threshold",
+        tokensBefore: 152_275,
+        limit: 147_456,
+        contextWindow: 163_840,
+        summarisedMessages: 48,
+        preservedMessages: 3,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("Optimising context")).toBeDefined());
+    expect(screen.getByText("the context window was nearly full · summarising 48 earlier messages")).toBeDefined();
+    expect(document.querySelector(".timeline-event.working.notice")).not.toBeNull();
+  });
+
+  it("replaces the in-flight line with what the compaction actually did", async () => {
+    const stream = await streamCompaction();
+
+    act(() => stream.emit(1, "compaction_started", { reason: "threshold", summarisedMessages: 48 }));
+    await waitFor(() => expect(screen.getByText("Optimising context")).toBeDefined());
+
+    act(() =>
+      stream.emit(2, "compaction_completed", {
+        reason: "threshold",
+        snapshotId: "snapshot-1",
+        tokensBefore: 152_275,
+        tokensAfter: 2_294,
+        summarisedMessages: 48,
+        preservedMessages: 3,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText("Context optimised")).toBeDefined());
+    expect(screen.queryByText("Optimising context")).toBeNull();
+    expect(screen.getByText("48 earlier messages summarised · 3 recent requests kept in full")).toBeDefined();
+    expect(screen.getByText(`${(152_275).toLocaleString()} → ${(2_294).toLocaleString()} tokens`)).toBeDefined();
+  });
+
+  it("names the overflow that forced the compaction", async () => {
+    const stream = await streamCompaction();
+
+    act(() => stream.emit(1, "compaction_started", { reason: "context_overflow", summarisedMessages: 1 }));
+
+    await waitFor(() =>
+      expect(screen.getByText("the model refused the request as too long · summarising 1 earlier message")).toBeDefined(),
+    );
+  });
+
+  it("reports a failed compaction without claiming the context shrank", async () => {
+    const stream = await streamCompaction();
+
+    act(() => stream.emit(1, "compaction_started", { reason: "threshold", summarisedMessages: 12 }));
+    act(() => stream.emit(2, "compaction_failed", { reason: "threshold", error: "The summary model timed out" }));
+
+    await waitFor(() => expect(screen.getByText("Context optimisation failed")).toBeDefined());
+    expect(screen.getByText("The summary model timed out")).toBeDefined();
+    expect(screen.queryByText("Context optimised")).toBeNull();
+    expect(document.querySelector(".timeline-event.warning.notice")).not.toBeNull();
+  });
+
+  it("keeps the compaction visible after the finished run collapses its steps", async () => {
+    const stream = await streamCompaction();
+
+    act(() => stream.emit(1, "run_started", {}));
+    act(() => stream.emit(2, "tool_started", { callId: "call-1", toolName: "read" }));
+    act(() =>
+      stream.emit(3, "compaction_completed", {
+        reason: "threshold",
+        tokensBefore: 152_275,
+        tokensAfter: 2_294,
+        summarisedMessages: 48,
+        preservedMessages: 3,
+      }),
+    );
+    act(() => stream.emit(4, "run_completed", { outputTokens: 10 }));
+
+    // The tool call folds into the run summary; the compaction stays on the thread.
+    await waitFor(() => expect(screen.getByText(/^Worked for/)).toBeDefined());
+    expect(screen.getByText("Context optimised")).toBeDefined();
+    expect(screen.getByText(`${(152_275).toLocaleString()} → ${(2_294).toLocaleString()} tokens`)).toBeDefined();
+  });
+});
+
 describe("accessible labels", () => {
   it("names every control the composer and sidebar add", async () => {
     await openConsole();

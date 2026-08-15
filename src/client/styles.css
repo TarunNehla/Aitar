@@ -312,6 +312,17 @@ button:disabled { cursor: not-allowed; }
 .timeline-event.error .timeline-event-icon { color: var(--state-failed-fg); }
 .timeline-event-verb { flex: none; color: var(--text-body); font: var(--type-body); }
 .timeline-event.error .timeline-event-verb { color: var(--text-danger); }
+/* The agent shortening its own memory is rare and consequential, so it reads as a
+   notice rather than as one more step in the list. */
+.timeline-event.notice {
+  justify-self: start;
+  max-width: 100%;
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--inset-hairline);
+}
+.timeline-event.notice .timeline-event-code { background: var(--surface-panel); }
 .timeline-event-detail {
   min-width: 0;
   overflow: hidden;

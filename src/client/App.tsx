@@ -150,6 +150,24 @@ function countLabel(value: unknown, singular: string, plural = `${singular}s`): 
   return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
 }
 
+function joinDetail(parts: Array<string | null | undefined | false>): string {
+  return parts.filter(Boolean).join(" · ");
+}
+
+/** Why the agent had to shorten its own context, in the reader's terms rather than the runtime's. */
+function compactionReason(value: unknown): string {
+  if (value === "context_overflow") return "the model refused the request as too long";
+  if (value === "hard_token_limit") return "the configured context budget was reached";
+  return "the context window was nearly full";
+}
+
+function tokenTransfer(before: unknown, after: unknown): string {
+  const from = Number(before);
+  const to = Number(after);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return "";
+  return `${from.toLocaleString()} → ${to.toLocaleString()} tokens`;
+}
+
 /** One borderless line per tool call: a verb, an optional mono chip, a muted detail. */
 function toolPresentation(block: MessageView["blocks"][number] | undefined, failed: boolean) {
   const data = block?.data ?? {};
@@ -369,8 +387,14 @@ function formatDuration(startedAt: string, endedAt: string): string {
 // Run lifecycle events describe the run itself, so they become the group summary
 // rather than lines inside it.
 const runLifecycleTypes = new Set(["run_started", "run_completed"]);
-// A checkpoint labels its diff card and a failure needs reading, so neither collapses.
-const uncollapsibleTypes = new Set(["checkpoint_saved", "run_failed"]);
+// A checkpoint labels its diff card, a failure needs reading, and losing earlier
+// context is something the reader has to be told about, so none of them collapse.
+const uncollapsibleTypes = new Set([
+  "checkpoint_saved",
+  "run_failed",
+  "compaction_completed",
+  "compaction_failed",
+]);
 
 /** Groups finished activity while keeping messages in their original timeline positions. */
 function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNode[] {
@@ -442,6 +466,9 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
       .filter(Boolean),
   );
   const reasoningCompletions = events.filter((event) => event.type === "reasoning_completed");
+  const compactionOutcomes = events.filter(
+    (event) => event.type === "compaction_completed" || event.type === "compaction_failed",
+  );
   const visibleTypes = new Set([
     "run_started",
     "run_completed",
@@ -451,6 +478,9 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "file_changed",
     "checkpoint_saved",
     "vision_capability_fallback",
+    "compaction_started",
+    "compaction_completed",
+    "compaction_failed",
   ]);
 
   const timeline: TimelineItem[] = messages.map((message) => ({
@@ -464,6 +494,15 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
   for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
     if (!visibleTypes.has(event.type)) continue;
     if (event.type === "tool_started" && completedToolCalls.has(String(event.payload.callId ?? ""))) continue;
+    // The in-flight line is there to explain the pause; its outcome replaces it.
+    if (
+      event.type === "compaction_started" &&
+      compactionOutcomes.some(
+        (outcome) => outcome.runId === event.runId && outcome.sequence > event.sequence,
+      )
+    ) {
+      continue;
+    }
     const commit = event.type === "checkpoint_saved" ? String(event.payload.commit ?? "") : "";
     const changedFileCount = Number(
       event.payload.changedFileCount ??
@@ -1488,6 +1527,25 @@ function TimelineEvent({
       (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
     );
     detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
+  } else if (event.type === "compaction_started") {
+    icon = "archive";
+    verb = "Optimising context";
+    const summarising = countLabel(event.payload.summarisedMessages, "earlier message");
+    detail = joinDetail([compactionReason(event.payload.reason), summarising && `summarising ${summarising}`]);
+    tone = "working";
+  } else if (event.type === "compaction_completed") {
+    icon = "archive";
+    verb = "Context optimised";
+    const summarised = countLabel(event.payload.summarisedMessages, "earlier message");
+    const kept = countLabel(event.payload.preservedMessages, "recent request");
+    detail = joinDetail([summarised && `${summarised} summarised`, kept && `${kept} kept in full`]);
+    code = tokenTransfer(event.payload.tokensBefore, event.payload.tokensAfter);
+    tone = "success";
+  } else if (event.type === "compaction_failed") {
+    icon = "alert-triangle";
+    verb = "Context optimisation failed";
+    detail = String(event.payload.error ?? "The earlier messages could not be summarised");
+    tone = "warning";
   }
 
   if (event.type === "tool_started" && liveOutput) {
@@ -1508,8 +1566,12 @@ function TimelineEvent({
     );
   }
 
+  // Losing earlier context is a system action, not a step, so it gets a notice
+  // treatment instead of blending into the quiet list of things the agent did.
+  const notice = event.type.startsWith("compaction_") ? " notice" : "";
+
   return (
-    <div className={`timeline-event ${tone}`}>
+    <div className={`timeline-event ${tone}${notice}`}>
       <span className="timeline-event-icon">
         <Icon name={icon} size={14} />
       </span>
