@@ -138,6 +138,12 @@ A pinned provider that does not serve the selected model fails the request inste
 
 Each run logs the routing it used under `providerRouting`.
 
+## Interface
+
+Every screen follows [`docs/ui-guidelines.md`](docs/ui-guidelines.md): minimal text, one clear heading, one obvious primary action, and meaningful icons. Read it before adding a screen or writing user-facing copy.
+
+The design system it builds on is documented in [`src/client/design-system/README.md`](src/client/design-system/README.md).
+
 ## Authentication
 
 Better Auth owns sign-in, sessions, and account linking.

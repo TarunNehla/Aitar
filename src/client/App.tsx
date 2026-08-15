@@ -6,17 +6,15 @@ import { api } from "./api";
 import {
   clearAuthQueryParameters,
   readAuthQueryParameters,
-  readResetPasswordToken,
-  resetPasswordPath,
   returnToSignIn,
   useAuthMethods,
   useSession,
 } from "./auth-client";
+import { readAuthEntry, signInEntry } from "./auth-flow";
+import { AuthScreen } from "./components/auth/AuthScreen";
 import { Dialog } from "./components/Dialog";
 import { Icon, type IconName } from "./components/Icon";
 import { RepositoryConnect } from "./components/RepositoryConnect";
-import { ResetPassword } from "./components/ResetPassword";
-import { SignIn } from "./components/SignIn";
 import { Spinner } from "./components/Spinner";
 import { UserMenu, type SessionUser } from "./components/UserMenu";
 import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
@@ -528,20 +526,20 @@ export function App() {
   const { data: session, isPending } = useSession();
   const authMethods = useAuthMethods();
   const [authQuery] = useState(() => readAuthQueryParameters(window.location.search));
-  const [resetToken] = useState(() => readResetPasswordToken(window.location));
-  const [resettingPassword, setResettingPassword] = useState(() => window.location.pathname === resetPasswordPath);
+  const [entry, setEntry] = useState(() => readAuthEntry(window.location));
 
   useEffect(() => {
     clearAuthQueryParameters();
   }, []);
 
-  if (resettingPassword) {
+  if (entry.ownsPage) {
     return (
-      <ResetPassword
-        token={resetToken}
-        onDone={() => {
+      <AuthScreen
+        entry={entry}
+        emailPassword={authMethods?.emailPassword ?? false}
+        onLeaveLink={() => {
           returnToSignIn();
-          setResettingPassword(false);
+          setEntry(signInEntry);
         }}
       />
     );
@@ -550,7 +548,7 @@ export function App() {
   if (isPending) return <div className="center-state">Opening Aitar…</div>;
   if (!session?.user) {
     if (!authMethods) return <div className="center-state">Opening Aitar…</div>;
-    return <SignIn error={authQuery.oauthError} emailPassword={authMethods.emailPassword} />;
+    return <AuthScreen entry={entry} emailPassword={authMethods.emailPassword} />;
   }
 
   return (
@@ -864,9 +862,7 @@ function Console({
       ? "error"
       : detail?.session.id === selectedId ? "ready" : "loading";
 
-  const installationNotice = installationConnected
-    ? "GitHub installation connected. Pick a repository to start"
-    : null;
+  const installationNotice = installationConnected ? "GitHub connected" : null;
 
   if (loading) return <div className="center-state">Opening Aitar…</div>;
 
@@ -1164,7 +1160,7 @@ function ScreenshotThumbnail({
         <img src={source} alt={description} loading="lazy" />
       </button>
       {open && (
-        <Dialog title="Screenshot" description={url || undefined} onClose={() => setOpen(false)}>
+        <Dialog title={url || "Screenshot"} onClose={() => setOpen(false)}>
           <div className="screenshot-viewer">
             <img src={source} alt={description} />
           </div>

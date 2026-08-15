@@ -3,12 +3,12 @@ import { Icon } from "./Icon";
 
 export function Dialog({
   title,
-  description,
+  onBack,
   onClose,
   children,
 }: {
   title: string;
-  description?: string;
+  onBack?: () => void;
   onClose?: () => void;
   children: ReactNode;
 }) {
@@ -33,9 +33,13 @@ export function Dialog({
     >
       <div className="dialog" role="dialog" aria-modal="true" aria-labelledby={titleId}>
         <header className="dialog-header">
+          {onBack && (
+            <button className="icon-button" type="button" aria-label="Back" onClick={onBack}>
+              <Icon name="arrow-left" size={16} />
+            </button>
+          )}
           <div className="dialog-heading">
             <h2 id={titleId}>{title}</h2>
-            {description && <p>{description}</p>}
           </div>
           {onClose && (
             <button className="dialog-close" type="button" aria-label="Close" onClick={onClose}>

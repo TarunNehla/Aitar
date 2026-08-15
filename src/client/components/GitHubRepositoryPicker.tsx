@@ -22,8 +22,8 @@ export interface GitHubRepository {
 }
 
 const statusMessages: Record<string, string> = {
-  suspended: "This installation is suspended on GitHub. Unsuspend it, then retry",
-  deleted: "This installation was removed from GitHub. Connect it again",
+  suspended: "Suspended on GitHub",
+  deleted: "Removed on GitHub",
 };
 
 export function GitHubRepositoryPicker({
@@ -109,15 +109,36 @@ export function GitHubRepositoryPicker({
     );
   }
 
+  if (installations.length === 0) {
+    return (
+      <div className="github-panel">
+        {!appConfigured ? (
+          <div className="form-error">GitHub App not configured on this server</div>
+        ) : (
+          <div className="github-empty">
+            <div className="empty-icon">
+              <Icon name="folder-git-2" size={20} />
+            </div>
+            <p>No GitHub account connected</p>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={connecting}
+              onClick={() => void startInstallation()}
+            >
+              {connecting ? <Spinner size={16} /> : <Icon name="plus" size={16} />}
+              Connect GitHub
+            </button>
+          </div>
+        )}
+        {error && <div className="form-error">{error}</div>}
+      </div>
+    );
+  }
+
   return (
     <div className="github-panel">
       {notice && <div className="github-notice">{notice}</div>}
-
-      {!appConfigured && (
-        <div className="form-error">
-          The GitHub App is not configured on this server. Add the app credentials to enable private repositories
-        </div>
-      )}
 
       <div className="github-accounts-row">
         <div className="github-accounts">
@@ -137,19 +158,14 @@ export function GitHubRepositoryPicker({
         <button
           className="ghost-button"
           type="button"
+          aria-label="Add repositories"
+          title="Add repositories"
           disabled={connecting || !appConfigured}
           onClick={() => void startInstallation()}
         >
           {connecting ? <Spinner size={16} /> : <Icon name="plus" size={16} />}
-          {installations.length === 0 ? "Connect GitHub repositories" : "Add repositories"}
         </button>
       </div>
-
-      {installations.length === 0 && appConfigured && (
-        <p className="github-empty">
-          Install the Aitar GitHub App on an account, pick the repositories it may read, and they appear here.
-        </p>
-      )}
 
       {selected && selected.status !== "active" && (
         <div className="form-error">
@@ -175,9 +191,18 @@ export function GitHubRepositoryPicker({
       )}
 
       {repositories !== null && repositories.length === 0 && !error && selected?.status === "active" && (
-        <p className="github-empty">
-          This installation has no repositories yet. Add repositories to it on GitHub, then retry.
-        </p>
+        <div className="github-empty">
+          <p>No repositories shared with Aitar</p>
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={connecting}
+            onClick={() => void startInstallation()}
+          >
+            <Icon name="plus" size={16} />
+            Add repositories
+          </button>
+        </div>
       )}
 
       {repositories !== null && repositories.length > 0 && selected && (

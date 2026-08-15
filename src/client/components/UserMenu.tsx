@@ -12,9 +12,10 @@ import {
   useAuthMethods,
   type SocialProvider,
 } from "../auth-client";
+import { describePasswordProblem } from "../auth-flow";
+import { PasswordField } from "./auth/PasswordField";
 import { Icon } from "./Icon";
-import { PasswordInput } from "./PasswordInput";
-import { describePasswordProblem } from "./SignIn";
+import { ProviderIcon } from "./ProviderIcon";
 import { Spinner } from "./Spinner";
 
 export interface SessionUser {
@@ -131,7 +132,10 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
                 const isConnected = connected.includes(provider);
                 return (
                   <div className="user-menu-provider" key={provider}>
-                    <span className="user-menu-provider-name">{providerLabels[provider]}</span>
+                    <span className="user-menu-provider-name">
+                      <ProviderIcon provider={provider} size={16} />
+                      {providerLabels[provider]}
+                    </span>
                     {isConnected ? (
                       <span className="provider-connected">
                         <Icon name="check" size={14} />
@@ -141,6 +145,7 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
                       <button
                         className="link-button"
                         type="button"
+                        title="Adds a sign-in method"
                         disabled={busy !== null}
                         onClick={() => void connect(provider)}
                       >
@@ -151,9 +156,6 @@ export function UserMenu({ user, onSignedOut }: { user: SessionUser; onSignedOut
                 );
               })
             )}
-            <small className="user-menu-hint">
-              Connecting GitHub here signs you in. Repository access is granted separately
-            </small>
           </div>
 
           {authMethods?.emailPassword && (
@@ -256,14 +258,14 @@ function ChangePasswordForm({ disabled }: { disabled: boolean }) {
 
   return (
     <form className="user-menu-password auth-fields" onSubmit={submit} noValidate>
-      <PasswordInput
+      <PasswordField
         label="Current password"
         autoComplete="current-password"
         value={current}
         disabled={submitting}
         onChange={setCurrent}
       />
-      <PasswordInput
+      <PasswordField
         label="New password"
         autoComplete="new-password"
         value={next}
@@ -271,7 +273,7 @@ function ChangePasswordForm({ disabled }: { disabled: boolean }) {
         error={fieldErrors.password}
         onChange={setNext}
       />
-      <PasswordInput
+      <PasswordField
         label="Confirm new password"
         autoComplete="new-password"
         value={confirmation}
@@ -333,12 +335,15 @@ function CreatePasswordAction({ email, disabled }: { email: string; disabled: bo
 
   return (
     <div className="user-menu-password">
-      <button className="link-button" type="button" disabled={disabled || sending} onClick={() => void start()}>
+      <button
+        className="link-button"
+        type="button"
+        title="We email you a link to set it"
+        disabled={disabled || sending}
+        onClick={() => void start()}
+      >
         {sending ? "Sending…" : "Create a password"}
       </button>
-      <small className="user-menu-hint">
-        Aitar emails a link so the password is set after proving you can read this address
-      </small>
       {message && <small className="user-menu-hint" role="status">{message}</small>}
     </div>
   );

@@ -234,7 +234,8 @@ describe("authenticated application state", () => {
     window.history.replaceState({}, "", "/reset-password");
     render(<App />);
 
-    expect(screen.getByText("That link is incomplete")).toBeDefined();
+    expect(screen.getByRole("heading", { name: "That link expired" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Request a new link" })).toBeDefined();
     expect(screen.queryByLabelText("New password")).toBeNull();
   });
 

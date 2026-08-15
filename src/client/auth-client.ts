@@ -154,15 +154,9 @@ export function useAuthMethods(): AuthMethods | null {
 export function readAuthQueryParameters(search: string) {
   const parameters = new URLSearchParams(search);
   return {
-    oauthError: describeOAuthError(parameters.get("error")),
     installationError: describeInstallationError(parameters.get("github_error")),
     installationId: parameters.get("github_installation"),
   };
-}
-
-export function readResetPasswordToken(location: { pathname: string; search: string }): string | null {
-  if (location.pathname !== resetPasswordPath) return null;
-  return new URLSearchParams(location.search).get("token");
 }
 
 export function clearAuthQueryParameters() {

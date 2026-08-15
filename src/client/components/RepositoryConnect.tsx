@@ -8,15 +8,18 @@ import {
   type GitHubRepository,
 } from "./GitHubRepositoryPicker";
 import { Icon } from "./Icon";
+import { ProviderIcon } from "./ProviderIcon";
 import { RepositorySetup } from "./RepositorySetup";
 import { Spinner } from "./Spinner";
 
 const sources = ["github", "public"] as const;
 type Source = (typeof sources)[number];
 
+export const onboardingQuestion = "What would you like to work on?";
+
 const sourceLabels: Record<Source, string> = {
-  github: "GitHub repositories",
-  public: "Public URL",
+  github: "Connect GitHub repository",
+  public: "Open public repository URL",
 };
 
 export function RepositoryConnect({
@@ -34,7 +37,7 @@ export function RepositoryConnect({
   onCreated: (sessionId: string) => Promise<void>;
   onClose?: () => void;
 }) {
-  const [source, setSource] = useState<Source>("github");
+  const [source, setSource] = useState<Source | null>(null);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -81,76 +84,64 @@ export function RepositoryConnect({
     }
   }
 
-  const body: ReactNode = (
-    <div className="repository-connect">
-      <div className="source-switch" role="tablist">
-        {sources.map((entry) => (
-          <button
-            className={`source-tab ${entry === source ? "selected" : ""}`}
-            key={entry}
-            role="tab"
-            aria-selected={entry === source}
-            type="button"
-            disabled={busy}
-            onClick={() => setSource(entry)}
-          >
-            {sourceLabels[entry]}
-          </button>
-        ))}
-      </div>
-
-      {source === "github" ? (
-        <>
-          <GitHubRepositoryPicker
-            notice={installationNotice}
-            busy={busy}
-            onSelect={connectGithubRepository}
-          />
-          {stage && (
-            <p className="setup-step active">
-              <Spinner size={14} />
-              {stage}
-            </p>
-          )}
-          {(connectError ?? error) && <div className="form-error">{connectError ?? error}</div>}
-        </>
-      ) : (
-        <RepositorySetup
-          variant="embedded"
-          defaultModel={defaultModel}
-          error={error}
-          onCreated={onCreated}
-        />
-      )}
+  const choices: ReactNode = (
+    <div className="source-choices">
+      {sources.map((entry) => (
+        <button className="source-choice" key={entry} type="button" onClick={() => setSource(entry)}>
+          <span className="source-choice-mark">
+            {entry === "github" ? <ProviderIcon provider="github" size={20} /> : <Icon name="globe" size={20} />}
+          </span>
+          <span className="source-choice-label">{sourceLabels[entry]}</span>
+          <Icon name="chevron-right" size={16} />
+        </button>
+      ))}
+      {error && <div className="form-error">{error}</div>}
     </div>
   );
+
+  const step: ReactNode = source === "github" ? (
+    <>
+      <GitHubRepositoryPicker notice={installationNotice} busy={busy} onSelect={connectGithubRepository} />
+      {stage && (
+        <p className="setup-step active">
+          <Spinner size={14} />
+          {stage}
+        </p>
+      )}
+      {(connectError ?? error) && <div className="form-error">{connectError ?? error}</div>}
+    </>
+  ) : (
+    <RepositorySetup defaultModel={defaultModel} error={error} onCreated={onCreated} />
+  );
+
+  const body = source === null ? choices : step;
+  const goBack = busy ? undefined : () => setSource(null);
 
   if (variant === "dialog") {
     return (
       <Dialog
-        title="New repository"
-        description="Connect a repository through the GitHub App, or clone a public URL"
+        title={source === null ? onboardingQuestion : sourceLabels[source]}
+        onBack={source === null ? undefined : goBack}
         onClose={busy ? undefined : onClose}
       >
-        {body}
+        <div className="repository-connect">{body}</div>
       </Dialog>
     );
   }
 
   return (
     <main className="onboarding">
-      <div className="onboarding-copy">
-        <p className="eyebrow">Aitar</p>
-        <h1>Connect a repository</h1>
-        <p>The agent works on a branch in your repository and reports back here.</p>
-      </div>
-      <div className="setup-form framed">
-        <div className="connect-heading">
-          <Icon name="folder-git-2" size={20} />
-          <strong>Choose a source</strong>
-        </div>
-        {body}
-      </div>
+      <section className="onboarding-panel">
+        <header className="onboarding-header">
+          {source !== null && (
+            <button className="icon-button" type="button" aria-label="Back" onClick={goBack}>
+              <Icon name="arrow-left" size={16} />
+            </button>
+          )}
+          <h1>{source === null ? onboardingQuestion : sourceLabels[source]}</h1>
+        </header>
+        <div className="repository-connect">{body}</div>
+      </section>
     </main>
   );
 }
