@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface SessionState {
@@ -99,6 +99,56 @@ function sessionCard() {
 async function openComposer() {
   await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
   return document.querySelector(".composer") as HTMLFormElement;
+}
+
+/** Mirrors the persisted shape of an agent reply, whose text carries both visibilities. */
+function assistantMessage(id: string, text: string) {
+  return {
+    id,
+    parentMessageId: null,
+    role: "assistant",
+    status: "complete",
+    model: deepseekModel,
+    createdAt: "2026-01-01T00:00:10.000Z",
+    blocks: [{ id: `block-${id}`, position: 0, type: "text", text, data: {}, visibility: "both" }],
+  };
+}
+
+/** Drives the session stream by hand so a test can order events against fetches. */
+class RecordingEventSource {
+  static latest: RecordingEventSource | null = null;
+  private readonly listeners = new Map<string, Array<() => void>>();
+  onmessage: ((message: { data: string }) => void) | null = null;
+  onerror: unknown = null;
+  onopen: unknown = null;
+
+  constructor() {
+    RecordingEventSource.latest = this;
+  }
+
+  addEventListener(type: string, listener: () => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+  }
+
+  close() {}
+
+  ready() {
+    for (const listener of this.listeners.get("ready") ?? []) listener();
+  }
+
+  emit(sequence: number, type: string, payload: Record<string, unknown> = {}) {
+    this.onmessage?.({
+      data: JSON.stringify({
+        id: `event-${sequence}`,
+        sessionId: "session-1",
+        runId: "run-1",
+        sequence,
+        type,
+        payload,
+        createdAt: new Date(Date.parse("2026-01-01T00:00:00Z") + sequence * 1_000).toISOString(),
+      }),
+    });
+  }
 }
 
 /** Builds the tool-result message shape the runner persists, summary only. */
@@ -891,6 +941,70 @@ describe("branch information is gone from the interface", () => {
     );
     const [, options] = apiMock.mock.calls.find(([path]) => String(path).endsWith("/chats")) as [string, RequestInit];
     expect(Object.keys(JSON.parse(String(options.body)))).not.toContain("baseBranch");
+  });
+});
+
+describe("streamed agent replies", () => {
+  it("keeps the reply on screen while the next tool call runs", async () => {
+    sessionMessages = [userMessage("message-1", "Fix the header")];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    await openComposer();
+
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+    act(() => stream.emit(1, "assistant_text_delta", { delta: "Reading the header component." }));
+
+    await waitFor(() => expect(screen.getByText("Reading the header component.")).toBeDefined());
+
+    // The run stores the reply before it announces it, but the stored copy only
+    // reaches the client with the next session fetch, which the tool call outruns.
+    act(() => stream.emit(2, "assistant_message_completed", { messageId: "message-2" }));
+    act(() => stream.emit(3, "tool_started", { callId: "call-1", toolName: "read" }));
+    await waitFor(() => expect(screen.getByText("Running")).toBeDefined());
+
+    expect(screen.getByText("Reading the header component.")).toBeDefined();
+
+    sessionMessages = [
+      userMessage("message-1", "Fix the header"),
+      assistantMessage("message-2", "Reading the header component."),
+      toolMessage("call-1", "read", { path: "src/Header.tsx", lines: 12, bytes: 300 }),
+    ];
+    act(() => stream.emit(4, "tool_completed", { callId: "call-1", toolName: "read" }));
+
+    await waitFor(() => expect(screen.getByText("Read")).toBeDefined());
+    expect(screen.getAllByText("Reading the header component.")).toHaveLength(1);
+    expect(document.querySelector(".assistant-message.streaming")).toBeNull();
+  });
+
+  it("ignores a session reply that a newer one has already overtaken", async () => {
+    const waiting: Array<() => void> = [];
+    apiMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      const body = respond(path, options);
+      if (path !== "/api/sessions/session-1" || options) return body;
+      return new Promise((resolve) => waiting.push(() => resolve(body)));
+    });
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    sessionMessages = [userMessage("message-1", "Fix the header")];
+    await openConsole();
+
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+    await waitFor(() => expect(waiting).toHaveLength(1));
+
+    sessionMessages = [
+      userMessage("message-1", "Fix the header"),
+      assistantMessage("message-2", "The header is centred now."),
+    ];
+    act(() => stream.emit(1, "run_completed", { outputTokens: 10 }));
+    await waitFor(() => expect(waiting).toHaveLength(2));
+
+    act(() => waiting[1]());
+    await waitFor(() => expect(screen.getByText("The header is centred now.")).toBeDefined());
+
+    act(() => waiting[0]());
+    await waitFor(() => expect(screen.getByText("Fix the header")).toBeDefined());
+    expect(screen.getByText("The header is centred now.")).toBeDefined();
   });
 });
 

@@ -82,6 +82,15 @@ interface PendingMessage {
   messageId: string | null;
 }
 
+/**
+ * A streamed assistant turn. It stays on screen after the run reports the message
+ * as stored, because the stored copy only arrives with the next session fetch.
+ */
+interface StreamedAssistant {
+  text: string;
+  messageId: string | null;
+}
+
 const activeStatuses = new Set(["pending", "running", "cancelling"]);
 const liveOutputLimit = 100_000;
 const agentStatuses = [
@@ -563,7 +572,7 @@ function Console({
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [changesByCommit, setChangesByCommit] = useState<Record<string, CodeChanges>>({});
   const [events, setEvents] = useState<SessionEvent[]>([]);
-  const [streamingText, setStreamingText] = useState("");
+  const [streamedAssistants, setStreamedAssistants] = useState<StreamedAssistant[]>([]);
   const [liveToolOutput, setLiveToolOutput] = useState<Record<string, string>>({});
   const [processOutput, setProcessOutput] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -580,6 +589,7 @@ function Console({
   const selectedSessionRef = useRef<string | null>(null);
   const eventReplayReadyRef = useRef(false);
   const latestSequenceRef = useRef(0);
+  const detailRequestRef = useRef(0);
   selectedSessionRef.current = selectedId;
 
   const loadSessions = useCallback(async () => {
@@ -597,13 +607,16 @@ function Console({
 
   const loadDetail = useCallback(async (sessionId: string, background = false) => {
     if (!background) setDetailError(null);
+    // Several events refresh the session at once, so an earlier reply must never
+    // replace a later one and drop the messages it already carried.
+    const request = ++detailRequestRef.current;
     try {
       const result = await api<SessionDetail>(`/api/sessions/${sessionId}`);
-      if (selectedSessionRef.current !== sessionId) return;
+      if (selectedSessionRef.current !== sessionId || request !== detailRequestRef.current) return;
       setDetail(result);
       setDetailError(null);
     } catch (reason) {
-      if (selectedSessionRef.current !== sessionId) return;
+      if (selectedSessionRef.current !== sessionId || request !== detailRequestRef.current) return;
       const message = reason instanceof Error ? reason.message : String(reason);
       if (background) setError(message);
       else setDetailError(message);
@@ -626,7 +639,7 @@ function Console({
     if (!selectedId) return;
 
     setEvents([]);
-    setStreamingText("");
+    setStreamedAssistants([]);
     setLiveToolOutput({});
     setProcessOutput({});
     eventReplayReadyRef.current = false;
@@ -674,7 +687,16 @@ function Console({
       });
 
       if (eventReplayReadyRef.current && event.type === "assistant_text_delta") {
-        setStreamingText((current) => current + String(event.payload.delta ?? ""));
+        const delta = String(event.payload.delta ?? "");
+        if (delta) {
+          setStreamedAssistants((current) => {
+            const streaming = current[current.length - 1];
+            if (!streaming || streaming.messageId !== null) {
+              return [...current, { text: delta, messageId: null }];
+            }
+            return [...current.slice(0, -1), { ...streaming, text: streaming.text + delta }];
+          });
+        }
       }
 
       if (
@@ -686,7 +708,15 @@ function Console({
           "run_failed",
         ].includes(event.type)
       ) {
-        if (event.type === "assistant_message_completed") setStreamingText("");
+        if (event.type === "assistant_message_completed") {
+          const messageId = String(event.payload.messageId ?? "");
+          setStreamedAssistants((current) => {
+            const streaming = current[current.length - 1];
+            if (!streaming || streaming.messageId !== null) return current;
+            if (!messageId) return current.slice(0, -1);
+            return [...current.slice(0, -1), { ...streaming, messageId }];
+          });
+        }
         if (event.type === "tool_completed") {
           const callId = String(event.payload.callId ?? "");
           setLiveToolOutput((current) => {
@@ -713,11 +743,15 @@ function Console({
     [pendingMessages, selectedId, messageIds],
   );
 
+  // Client-side copies stay until the stored message they stand in for is fetched.
   useEffect(() => {
-    setPendingMessages((current) => {
-      const next = current.filter((item) => !(item.messageId && messageIds.has(item.messageId)));
+    const stored = (item: { messageId: string | null }) => Boolean(item.messageId && messageIds.has(item.messageId));
+    const drop = <Item extends { messageId: string | null }>(current: Item[]) => {
+      const next = current.filter((item) => !stored(item));
       return next.length === current.length ? current : next;
-    });
+    };
+    setPendingMessages(drop);
+    setStreamedAssistants(drop);
   }, [messageIds]);
 
   const awaitingAgent = Boolean(
@@ -772,7 +806,16 @@ function Console({
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
-  }, [agentStatus, changesByCommit, detail, liveToolOutput, processOutput, selectedId, streamingText, visiblePending]);
+  }, [
+    agentStatus,
+    changesByCommit,
+    detail,
+    liveToolOutput,
+    processOutput,
+    selectedId,
+    streamedAssistants,
+    visiblePending,
+  ]);
 
   const sessionsByRepository = useMemo(() => {
     const groups = new Map<string, { repository: Repository; sessions: SessionListItem[] }>();
@@ -1038,14 +1081,17 @@ function Console({
                 </div>
               )}
 
-              {streamingText && (
-                <div className="message assistant-message streaming">
+              {streamedAssistants.map((item) => (
+                <div
+                  className={`message assistant-message ${item.messageId ? "" : "streaming"}`}
+                  key={item.messageId ?? "streaming"}
+                >
                   <div className="message-body markdown-content">
-                    <MarkdownText>{streamingText}</MarkdownText>
-                    <span className="cursor" />
+                    <MarkdownText>{item.text}</MarkdownText>
+                    {!item.messageId && <span className="cursor" />}
                   </div>
                 </div>
-              )}
+              ))}
               </div>
             </div>
 
