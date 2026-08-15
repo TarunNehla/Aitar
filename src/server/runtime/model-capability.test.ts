@@ -7,10 +7,11 @@ const config = {
   VISION_CAPABILITY_CACHE_TTL_SECONDS: 21_600,
   VISION_REQUEST_TIMEOUT_SECONDS: 60,
   VISION_CAPABILITY_OVERRIDES: {} as Record<string, string>,
+  CONTEXT_WINDOW_FALLBACK_TOKENS: undefined as number | undefined,
 };
 vi.mock("../config.js", () => ({ config }));
 
-const { ModelCapabilityService, normaliseModelId } = await import("./model-capability.js");
+const { ModelCapabilityService, normaliseModelId, resolveContextWindow } = await import("./model-capability.js");
 
 const catalogue = {
   data: [
@@ -18,12 +19,15 @@ const catalogue = {
       id: "google/gemini-3.7-flash",
       architecture: { input_modalities: ["text", "image", "audio"] },
       pricing: { prompt: "0.000000375", completion: "0.000001875", input_cache_read: "0.0000000375" },
+      context_length: 1_048_576,
     },
     {
       id: "deepseek/deepseek-v4-flash-0731",
       architecture: { input_modalities: ["text"] },
       pricing: { prompt: "0.0000002", completion: "0.0000008" },
+      context_length: 163_840,
     },
+    { id: "context/only", architecture: {}, pricing: { prompt: "0.000001" }, context_length: 32_000 },
     { id: "openrouter/auto", architecture: { input_modalities: ["text", "image"] }, pricing: { prompt: "0" } },
     { id: "weird/no-modalities", architecture: {}, pricing: { prompt: "0.000001" } },
     {
@@ -50,6 +54,7 @@ beforeEach(() => {
   now = 1_000_000;
   config.VISION_CAPABILITY_OVERRIDES = {};
   config.VISION_CAPABILITY_CACHE_TTL_SECONDS = 21_600;
+  config.CONTEXT_WINDOW_FALLBACK_TOKENS = undefined;
   fetchMock = vi.fn(async () => new Response(JSON.stringify(catalogue), { status: 200 }));
 });
 
@@ -235,6 +240,68 @@ describe("manual capability overrides", () => {
     const capability = await service().capabilityOf("openrouter/auto");
     expect(capability.supportsImages).toBe(true);
     expect(capability.source).toBe("override");
+  });
+});
+
+describe("context window", () => {
+  it("reads the context length the model advertises", async () => {
+    const capabilities = service();
+    expect(await capabilities.contextWindowOf("google/gemini-3.7-flash")).toBe(1_048_576);
+    expect(await capabilities.contextWindowOf("deepseek/deepseek-v4-flash-0731")).toBe(163_840);
+  });
+
+  it("reads a context length even when the model declares no modalities", async () => {
+    const capabilities = service();
+    expect(await capabilities.contextWindowOf("context/only")).toBe(32_000);
+    expect((await capabilities.capabilityOf("context/only")).source).toBe("unknown");
+  });
+
+  it("falls back to the base entry for a variant OpenRouter does not list separately", async () => {
+    expect(await service().contextWindowOf("google/gemini-3.7-flash:nitro")).toBe(1_048_576);
+  });
+
+  it("queries OpenRouter once and serves later lookups from the cache", async () => {
+    const capabilities = service();
+    await capabilities.contextWindowOf("google/gemini-3.7-flash");
+    await capabilities.contextWindowOf("google/gemini-3.7-flash");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(capabilities.cachedContextWindow("google/gemini-3.7-flash")).toBe(1_048_576);
+  });
+
+  it("shares one cache entry with the modality lookup", async () => {
+    const capabilities = service();
+    await capabilities.capabilityOf("google/gemini-3.7-flash");
+    await capabilities.contextWindowOf("google/gemini-3.7-flash");
+    expect(capabilities.cachedModalities("google/gemini-3.7-flash")).toEqual(["text", "image"]);
+    expect(capabilities.cachedContextWindow("google/gemini-3.7-flash")).toBe(1_048_576);
+  });
+
+  it("reports no context length for a model the metadata does not describe", async () => {
+    expect(await service().contextWindowOf("someone/never-published")).toBeNull();
+    expect(await service().contextWindowOf("openrouter/auto")).toBeNull();
+  });
+});
+
+describe("resolving the context window for a run", () => {
+  it("prefers the model's own advertised window", async () => {
+    expect(await resolveContextWindow("google/gemini-3.7-flash", service())).toEqual({
+      tokens: 1_048_576,
+      source: "metadata",
+    });
+  });
+
+  it("fails with a clear error rather than borrowing another model's window", async () => {
+    await expect(resolveContextWindow("someone/never-published", service())).rejects.toThrow(
+      /someone\/never-published.*CONTEXT_WINDOW_FALLBACK_TOKENS/s,
+    );
+  });
+
+  it("uses the explicitly configured fallback when one is set", async () => {
+    config.CONTEXT_WINDOW_FALLBACK_TOKENS = 64_000;
+    expect(await resolveContextWindow("someone/never-published", service())).toEqual({
+      tokens: 64_000,
+      source: "fallback",
+    });
   });
 });
 

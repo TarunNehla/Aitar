@@ -228,15 +228,32 @@ export const artifacts = pgTable(
   (table) => [index("artifacts_session_idx").on(table.sessionId)],
 );
 
-export const contextSnapshots = pgTable("context_snapshots", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
-  throughMessageId: uuid("through_message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
-  summary: text("summary").notNull(),
-  importantFacts: jsonb("important_facts").$type<Record<string, unknown>>().notNull().default({}),
-  tokenCount: integer("token_count").notNull().default(0),
-  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+/** One compaction: the summary that replaced older history, and where the preserved tail begins. */
+export const contextSnapshots = pgTable(
+  "context_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sessionId: uuid("session_id").notNull().references(() => chatSessions.id, { onDelete: "cascade" }),
+    /** Newest message this snapshot covers. Anything later is still verbatim history. */
+    throughMessageId: uuid("through_message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
+    /** Oldest user request kept verbatim. Between it and the horizon, only user messages survive. */
+    firstPreservedMessageId: uuid("first_preserved_message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    previousSnapshotId: uuid("previous_snapshot_id"),
+    summary: text("summary").notNull(),
+    model: text("model").notNull(),
+    reason: text("reason").notNull(),
+    promptVersion: text("prompt_version").notNull(),
+    tokensBefore: integer("tokens_before").notNull().default(0),
+    tokensAfter: integer("tokens_after").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    costUsd: doublePrecision("cost_usd").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("context_snapshots_session_idx").on(table.sessionId, table.createdAt)],
+);
 
 export const chatCheckpoints = pgTable(
   "chat_checkpoints",

@@ -4,6 +4,8 @@ export interface RunUsageTotals {
   costUsd: number;
   visionCostUsd: number;
   visionRequests: number;
+  compactionCostUsd: number;
+  compactions: number;
 }
 
 export interface VisionCharge {
@@ -18,6 +20,8 @@ export class RunCostAccount {
   private modelCostUsd = 0;
   private visionCostUsd = 0;
   private visionRequests = 0;
+  private compactionCostUsd = 0;
+  private compactions = 0;
 
   constructor(readonly maxCostUsd: number) {}
 
@@ -34,8 +38,15 @@ export class RunCostAccount {
     this.visionRequests += 1;
   }
 
+  addCompactionUsage(usage: { input: number; output: number; cost: { total: number } }): void {
+    this.inputTokens += usage.input;
+    this.outputTokens += usage.output;
+    this.compactionCostUsd += usage.cost.total;
+    this.compactions += 1;
+  }
+
   spentUsd(): number {
-    return this.modelCostUsd + this.visionCostUsd;
+    return this.modelCostUsd + this.visionCostUsd + this.compactionCostUsd;
   }
 
   remainingUsd(): number {
@@ -57,6 +68,8 @@ export class RunCostAccount {
       costUsd: this.spentUsd(),
       visionCostUsd: this.visionCostUsd,
       visionRequests: this.visionRequests,
+      compactionCostUsd: this.compactionCostUsd,
+      compactions: this.compactions,
     };
   }
 }

@@ -8,6 +8,7 @@ import {
   artifacts,
   chatCheckpoints,
   chatSessions,
+  contextSnapshots,
   events,
   messageBlocks,
   messages,
@@ -779,6 +780,40 @@ export async function getCheckpointForSession(sessionId: string, checkpointCommi
     .orderBy(desc(chatCheckpoints.createdAt))
     .limit(1);
   return result?.checkpoint;
+}
+
+export type ContextSnapshotRow = typeof contextSnapshots.$inferSelect;
+
+export async function createContextSnapshot(input: {
+  sessionId: string;
+  throughMessageId: string;
+  firstPreservedMessageId: string;
+  previousSnapshotId?: string | null;
+  summary: string;
+  model: string;
+  reason: string;
+  promptVersion: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}) {
+  const [snapshot] = await db
+    .insert(contextSnapshots)
+    .values({ ...input, previousSnapshotId: input.previousSnapshotId ?? null })
+    .returning();
+  return snapshot;
+}
+
+/** Newest first. The caller picks the snapshot that belongs to the branch it is replaying. */
+export async function listContextSnapshots(sessionId: string, limit = 50): Promise<ContextSnapshotRow[]> {
+  return db
+    .select()
+    .from(contextSnapshots)
+    .where(eq(contextSnapshots.sessionId, sessionId))
+    .orderBy(desc(contextSnapshots.createdAt))
+    .limit(limit);
 }
 
 export async function savePullRequest(input: {

@@ -14,6 +14,8 @@ describe("run cost account", () => {
       costUsd: 0,
       visionCostUsd: 0,
       visionRequests: 0,
+      compactionCostUsd: 0,
+      compactions: 0,
     });
     expect(account.remainingUsd()).toBe(2);
     expect(account.exceededBudget()).toBe(false);
@@ -37,8 +39,30 @@ describe("run cost account", () => {
       costUsd: 0.45,
       visionCostUsd: 0.05,
       visionRequests: 1,
+      compactionCostUsd: 0,
+      compactions: 0,
     });
     expect(account.remainingUsd()).toBeCloseTo(1.55);
+  });
+
+  it("adds compaction usage to the same run total", () => {
+    const account = new RunCostAccount(2);
+    account.addModelUsage(usage(0.4, 1_000, 100));
+    account.addCompactionUsage({ input: 8_000, output: 900, cost: { total: 0.12 } });
+
+    expect(account.totals()).toMatchObject({
+      inputTokens: 9_000,
+      outputTokens: 1_000,
+      costUsd: 0.52,
+      compactionCostUsd: 0.12,
+      compactions: 1,
+    });
+  });
+
+  it("counts compaction spend towards exceeding the budget", () => {
+    const account = new RunCostAccount(0.1);
+    account.addCompactionUsage({ input: 10, output: 10, cost: { total: 0.2 } });
+    expect(account.exceededBudget()).toBe(true);
   });
 
   it("counts each vision request separately", () => {

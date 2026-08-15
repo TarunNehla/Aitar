@@ -23,13 +23,15 @@ export interface ModelCostRates {
   cacheWrite: number;
 }
 
-interface CachedModalities {
-  modalities: InputModality[];
+interface CachedMetadata {
+  modalities: InputModality[] | null;
+  contextLength: number | null;
   expiresAt: number;
 }
 
 interface MetadataEntry {
-  modalities: InputModality[];
+  modalities: InputModality[] | null;
+  contextLength: number | null;
   cost: ModelCostRates | null;
 }
 
@@ -55,8 +57,13 @@ function readModalities(value: unknown): InputModality[] | null {
   return modalities.length > 0 ? [...new Set(modalities)] : null;
 }
 
+function readContextLength(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 export class ModelCapabilityService {
-  private readonly cache = new Map<string, CachedModalities>();
+  private readonly cache = new Map<string, CachedMetadata>();
   private inFlight: Promise<Map<string, MetadataEntry>> | null = null;
   private readonly log = logger.child({ component: "model-capability" });
 
@@ -70,7 +77,7 @@ export class ModelCapabilityService {
     this.inFlight = null;
   }
 
-  cachedModalities(modelId: string): InputModality[] | null {
+  private cached(modelId: string): CachedMetadata | null {
     const key = exactModelId(modelId);
     const entry = this.cache.get(key);
     if (!entry) return null;
@@ -78,7 +85,26 @@ export class ModelCapabilityService {
       this.cache.delete(key);
       return null;
     }
-    return entry.modalities;
+    return entry;
+  }
+
+  private remember(modelId: string, patch: Partial<Omit<CachedMetadata, "expiresAt">>): void {
+    const key = exactModelId(modelId);
+    const entry = this.cached(key);
+    this.cache.set(key, {
+      modalities: entry?.modalities ?? null,
+      contextLength: entry?.contextLength ?? null,
+      ...patch,
+      expiresAt: this.now() + config.VISION_CAPABILITY_CACHE_TTL_SECONDS * 1_000,
+    });
+  }
+
+  cachedModalities(modelId: string): InputModality[] | null {
+    return this.cached(modelId)?.modalities ?? null;
+  }
+
+  cachedContextWindow(modelId: string): number | null {
+    return this.cached(modelId)?.contextLength ?? null;
   }
 
   private override(modelId: string): InputModality[] | null {
@@ -109,18 +135,28 @@ export class ModelCapabilityService {
     }
 
     const entry = this.lookup(await this.metadata(signal), id);
-    if (!entry) return unknown;
+    if (!entry?.modalities) return unknown;
 
-    this.cache.set(id, {
-      modalities: entry.modalities,
-      expiresAt: this.now() + config.VISION_CAPABILITY_CACHE_TTL_SECONDS * 1_000,
-    });
+    this.remember(id, { modalities: entry.modalities, contextLength: entry.contextLength });
     return {
       modelId: id,
       modalities: entry.modalities,
       supportsImages: entry.modalities.includes("image"),
       source: "metadata",
     };
+  }
+
+  /** The model's own advertised context length. Null keeps callers from borrowing another model's window. */
+  async contextWindowOf(modelId: string, signal?: AbortSignal): Promise<number | null> {
+    const id = exactModelId(modelId);
+    if (!id) return null;
+
+    const cached = this.cachedContextWindow(id);
+    if (cached) return cached;
+
+    const contextLength = this.lookup(await this.metadata(signal), id)?.contextLength ?? null;
+    if (contextLength) this.remember(id, { contextLength });
+    return contextLength;
   }
 
   async costRatesFor(modelId: string, signal?: AbortSignal): Promise<ModelCostRates | null> {
@@ -152,15 +188,17 @@ export class ModelCapabilityService {
 
       for (const model of payload.data) {
         if (!model || typeof model !== "object") continue;
-        const record = model as { id?: unknown; architecture?: unknown; pricing?: unknown };
+        const record = model as { id?: unknown; architecture?: unknown; pricing?: unknown; context_length?: unknown };
         const id = exactModelId(record.id);
         if (!id) continue;
         const architecture = record.architecture as { input_modalities?: unknown } | undefined;
         const modalities = readModalities(architecture?.input_modalities);
-        if (!modalities) continue;
+        const contextLength = readContextLength(record.context_length);
+        if (!modalities && !contextLength) continue;
         const pricing = record.pricing as Record<string, unknown> | undefined;
         entries.set(id, {
           modalities,
+          contextLength,
           cost: pricing
             ? {
                 input: perMillion(pricing.prompt),
@@ -179,3 +217,29 @@ export class ModelCapabilityService {
 }
 
 export const modelCapabilities = new ModelCapabilityService();
+
+export interface ResolvedContextWindow {
+  tokens: number;
+  source: "metadata" | "fallback";
+}
+
+/**
+ * Context window for one model, or a clear failure. Guessing here would size compaction
+ * against a window the model does not have, so an unresolved model needs explicit configuration.
+ */
+export async function resolveContextWindow(
+  modelId: string,
+  capabilities: Pick<ModelCapabilityService, "contextWindowOf"> = modelCapabilities,
+  signal?: AbortSignal,
+): Promise<ResolvedContextWindow> {
+  const advertised = await capabilities.contextWindowOf(modelId, signal);
+  if (advertised) return { tokens: advertised, source: "metadata" };
+
+  const fallback = config.CONTEXT_WINDOW_FALLBACK_TOKENS;
+  if (fallback) return { tokens: fallback, source: "fallback" };
+
+  throw new Error(
+    `OpenRouter reports no context length for "${modelId}", so the compaction limit cannot be calculated. ` +
+      "Set CONTEXT_WINDOW_FALLBACK_TOKENS to run this model anyway.",
+  );
+}

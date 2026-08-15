@@ -1,4 +1,4 @@
-import { Agent, type AgentEvent, type AgentMessage } from "@earendil-works/pi-agent-core";
+import { Agent, convertToLlm, type AgentEvent, type AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   createModels,
   type AssistantMessage,
@@ -12,10 +12,12 @@ import {
   activateQueuedMessage,
   claimPendingRun,
   createAgentMessage,
+  createContextSnapshot,
   finishRun,
   finishToolExecution,
   getActiveBranchMessages,
   getSession,
+  listContextSnapshots,
   newWorkerId,
   recoverStaleRuns,
   renewRunLease,
@@ -28,10 +30,18 @@ import type { MessageView } from "../../shared/contracts.js";
 import { withRepositoryGitAccess } from "../github/repository-access.js";
 import { errorForLog, logger } from "../logger.js";
 import { createAgentTools } from "./agent-tools.js";
+import {
+  ContextCompactor,
+  createSummariser,
+  isContextOverflowError,
+  prepareOverflowRetry,
+  snapshotForBranch,
+} from "./context-compaction.js";
 import { EventWriter } from "./event-writer.js";
-import { modelCapabilities } from "./model-capability.js";
+import { modelCapabilities, resolveContextWindow } from "./model-capability.js";
 import { applyProviderRouting, configuredProviderPreferences } from "./openrouter-routing.js";
 import { RunCostAccount } from "./run-cost.js";
+import { WORKSPACE_PATH } from "./sandbox.js";
 import { createRunVisionRouter, recoverFromUnsupportedImage } from "./vision-router.js";
 import { workspaceManager } from "./workspace-manager.js";
 import { persistedToolSummary, safeToolArguments } from "./output-policy.js";
@@ -96,6 +106,25 @@ const systemPrompt = [
   "- Stop any process you started once you no longer need it.",
   "- When the work is done, reply with a short summary of what changed instead of calling another tool.",
 ].join("\n");
+
+interface ChatEnvironment {
+  baseBranch: string;
+  baseCommit: string | null;
+  headCommit: string | null;
+  publishedBranch: string | null;
+}
+
+/** Regenerated at compaction time, because a summary must never carry stale repository state. */
+function environmentDescription(session: ChatEnvironment, repositoryName: string): string {
+  return [
+    `Repository: ${repositoryName}`,
+    `Checkout: ${WORKSPACE_PATH}, detached HEAD`,
+    `Base branch: ${session.baseBranch}`,
+    `Base commit: ${session.baseCommit ?? "unknown"}`,
+    `Latest checkpoint commit: ${session.headCommit ?? "none"}`,
+    `Published branch: ${session.publishedBranch ?? "none"}`,
+  ].join("\n");
+}
 
 const models = createModels();
 models.setProvider(openrouterProvider());
@@ -395,20 +424,35 @@ export class AgentWorker {
       });
 
       const capability = await modelCapabilities.capabilityOf(run.model);
+      const contextWindow = await resolveContextWindow(run.model);
       await writer.emit("run_started", {
         model: run.model,
         workerId: this.workerId,
         imageInput: capability.supportsImages,
         capabilitySource: capability.source,
         visionRoutingMode: config.VISION_ROUTING_MODE,
+        contextWindow: contextWindow.tokens,
+        contextWindowSource: contextWindow.source,
       });
       runLog.info(
-        { imageInput: capability.supportsImages, capabilitySource: capability.source },
-        "Model image capability resolved",
+        {
+          imageInput: capability.supportsImages,
+          capabilitySource: capability.source,
+          contextWindow: contextWindow.tokens,
+          contextWindowSource: contextWindow.source,
+        },
+        "Model capabilities resolved",
       );
 
       const branch = await getActiveBranchMessages(run.session_id);
-      const history = branch.map(toPiMessage).filter((message): message is AgentMessage => Boolean(message));
+      const history: AgentMessage[] = [];
+      const historyIds: Array<[AgentMessage, string]> = [];
+      for (const view of branch) {
+        const message = toPiMessage(view);
+        if (!message) continue;
+        history.push(message);
+        historyIds.push([message, view.id]);
+      }
       const model: Model<any> = {
         ...modelFor(run.model),
         input: capability.supportsImages ? ["text", "image"] : ["text"],
@@ -430,6 +474,51 @@ export class AgentWorker {
         vision,
       });
 
+      const compactor = new ContextCompactor({
+        model: run.model,
+        contextWindow: contextWindow.tokens,
+        thresholdPercent: config.CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+        hardTokenLimit: config.CONTEXT_COMPACTION_HARD_TOKEN_LIMIT,
+        keepRecentTokens: config.CONTEXT_COMPACTION_KEEP_RECENT_TOKENS,
+        systemPrompt: () => systemPrompt,
+        tools: () => tools,
+        environment: async () => {
+          const current = await getSession(relation.session.id);
+          return environmentDescription(current?.session ?? relation.session, relation.repository.name);
+        },
+        summarise: createSummariser({
+          models,
+          model,
+          apiKey: () => config.OPENROUTER_API_KEY,
+          onPayload: applyProviderRouting,
+        }),
+        saveSnapshot: async (record) => {
+          const snapshot = await createContextSnapshot({
+            sessionId: run.session_id,
+            throughMessageId: record.throughMessageId,
+            firstPreservedMessageId: record.firstPreservedMessageId,
+            previousSnapshotId: record.previousSnapshotId,
+            summary: record.summary,
+            model: record.model,
+            reason: record.reason,
+            promptVersion: record.promptVersion,
+            tokensBefore: record.tokensBefore,
+            tokensAfter: record.tokensAfter,
+            inputTokens: record.usage.input,
+            outputTokens: record.usage.output,
+            costUsd: record.usage.cost.total,
+          });
+          return { id: snapshot.id };
+        },
+        emit: (type, payload) => writer.emit(type, payload),
+        onUsage: (usage) => cost.addCompactionUsage(usage),
+        snapshot: snapshotForBranch(
+          await listContextSnapshots(run.session_id),
+          branch.map((message) => message.id),
+        ),
+      });
+      for (const [message, messageId] of historyIds) compactor.register(message, messageId);
+
       const agent = new Agent({
         initialState: {
           systemPrompt,
@@ -439,6 +528,8 @@ export class AgentWorker {
           messages: history,
         },
         streamFn: models.streamSimple.bind(models),
+        convertToLlm,
+        transformContext: (messages, signal) => compactor.transformContext(messages, signal),
         onPayload: applyProviderRouting,
         getApiKey: () => config.OPENROUTER_API_KEY,
         sessionId: run.session_id,
@@ -455,6 +546,7 @@ export class AgentWorker {
           toolArgumentsByCall,
           getParent: () => parentMessageId,
           setParent: (id) => (parentMessageId = id),
+          register: (message, messageId) => compactor.register(message, messageId),
         });
 
         if (event.type === "turn_start") {
@@ -465,12 +557,30 @@ export class AgentWorker {
 
         if (event.type === "message_end" && event.message.role === "assistant") {
           cost.addModelUsage(event.message.usage);
+          compactor.recordUsage(event.message);
           if (cost.exceededBudget()) agent.abort();
         }
       });
 
       await agent.continue();
       await writer.drain();
+
+      const overflowRetry = prepareOverflowRetry({
+        errorMessage: agent.state.errorMessage,
+        messages: agent.state.messages,
+      });
+      if (overflowRetry) {
+        runLog.warn({ error: agent.state.errorMessage }, "Context overflow reported; compacting and retrying once");
+        compactor.requestCompaction("context_overflow");
+        agent.state.messages = overflowRetry;
+        await agent.continue();
+        await writer.drain();
+      }
+      if (isContextOverflowError(agent.state.errorMessage)) {
+        throw new Error(
+          `The request still exceeds the model context window after compaction: ${agent.state.errorMessage}`,
+        );
+      }
       const demoted = await recoverFromUnsupportedImage({
         errorMessage: agent.state.errorMessage,
         vision,
@@ -489,19 +599,45 @@ export class AgentWorker {
       await checkpoint();
 
       const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
-      const { visionCostUsd, visionRequests, ...usage } = cost.totals();
+      const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
       await finishRun({ runId: run.id, status, ...usage });
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
-      await writer.emit("run_completed", { status, ...usage, visionCostUsd, visionRequests, turns });
+      await writer.emit("run_completed", {
+        status,
+        ...usage,
+        visionCostUsd,
+        visionRequests,
+        compactionCostUsd,
+        compactions,
+        turns,
+      });
       runLog.info(
-        { status, ...usage, visionCostUsd, visionRequests, turns, durationMs: Date.now() - startedAt },
+        {
+          status,
+          ...usage,
+          visionCostUsd,
+          visionRequests,
+          compactionCostUsd,
+          compactions,
+          turns,
+          durationMs: Date.now() - startedAt,
+        },
         "Agent run finished",
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const { visionCostUsd, visionRequests, ...usage } = cost.totals();
+      const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
       runLog.error(
-        { error: errorForLog(error), ...usage, visionCostUsd, visionRequests, turns, durationMs: Date.now() - startedAt },
+        {
+          error: errorForLog(error),
+          ...usage,
+          visionCostUsd,
+          visionRequests,
+          compactionCostUsd,
+          compactions,
+          turns,
+          durationMs: Date.now() - startedAt,
+        },
         "Agent run failed",
       );
       try {
@@ -525,6 +661,7 @@ export class AgentWorker {
     toolArgumentsByCall: Map<string, Record<string, unknown>>;
     getParent: () => string | null;
     setParent: (id: string) => void;
+    register: (message: AgentMessage, messageId: string) => void;
   }): Promise<void> {
     const { event, run, writer } = input;
     if (event.type === "message_update") {
@@ -543,6 +680,7 @@ export class AgentWorker {
           parentMessageId: input.getParent(),
         });
         input.setParent(stored.id);
+        input.register(event.message, stored.id);
         await writer.emit("user_message_accepted", { messageId: stored.id });
       }
       return;
@@ -560,6 +698,7 @@ export class AgentWorker {
         blocks: assistantBlocks(event.message),
       });
       input.setParent(stored.id);
+      input.register(event.message, stored.id);
       await writer.emit("assistant_message_completed", { messageId: stored.id, stopReason: event.message.stopReason });
       return;
     }
@@ -575,6 +714,7 @@ export class AgentWorker {
       });
       input.toolArgumentsByCall.delete(event.message.toolCallId);
       input.setParent(stored.id);
+      input.register(event.message, stored.id);
       return;
     }
 

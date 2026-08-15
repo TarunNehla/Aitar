@@ -5,7 +5,18 @@ import { z } from "zod";
 
 if (existsSync(".env")) loadEnvFile(".env");
 
+/** Exported separately so the compaction tests can exercise validation without a whole environment. */
+export const contextCompactionEnvFields = {
+  CONTEXT_COMPACTION_THRESHOLD_PERCENT: z.coerce.number().gt(0).max(100).default(90),
+  CONTEXT_COMPACTION_HARD_TOKEN_LIMIT: z.coerce.number().int().positive().optional(),
+  CONTEXT_COMPACTION_KEEP_RECENT_TOKENS: z.coerce.number().int().positive().default(20_000),
+  CONTEXT_WINDOW_FALLBACK_TOKENS: z.coerce.number().int().positive().optional(),
+};
+
+export const contextCompactionEnvSchema = z.object(contextCompactionEnvFields);
+
 const envSchema = z.object({
+  ...contextCompactionEnvFields,
   DATABASE_URL: z.string().min(1),
   OPENROUTER_API_KEY: z.string().min(1).optional(),
   OPENROUTER_MODEL: z.string().default("deepseek/deepseek-v4-flash-0731"),

@@ -138,6 +138,25 @@ A pinned provider that does not serve the selected model fails the request inste
 
 Each run logs the routing it used under `providerRouting`.
 
+## Context compaction
+
+A long chat outgrows the model context window. Before every model request the backend estimates the whole context it is about to send, including the system prompt, tool definitions, attachments and any earlier summary, and compacts first when that estimate reaches the limit.
+
+Compaction keeps the recent **user requests** verbatim and folds everything else into a summary. Requests are taken newest first until the token budget is spent, and the newest one is always kept however large it is. Assistant replies, reasoning, tool calls and tool results are never part of that recent section; they survive only through the summary, which also means a tool call can never be separated from its result. The next request carries fresh system instructions, fresh tool definitions, freshly read repository state, the summary, the preserved requests, and any history the chat has gained since the last compaction.
+
+| Variable | Meaning |
+| --- | --- |
+| `CONTEXT_COMPACTION_THRESHOLD_PERCENT` | Percentage of the model context window at which compaction starts. Defaults to `90`. |
+| `CONTEXT_COMPACTION_HARD_TOKEN_LIMIT` | Optional absolute token ceiling. The effective limit is the lower of the two. |
+| `CONTEXT_COMPACTION_KEEP_RECENT_TOKENS` | Token budget for the preserved user requests. Defaults to `20000`. |
+| `CONTEXT_WINDOW_FALLBACK_TOKENS` | Context window used only when OpenRouter reports no context length for the run's model. Empty by default, so such a run fails instead of being sized against a guess. |
+
+The window itself comes from the selected model's `context_length` in the OpenRouter models API and is cached beside its modality metadata. No other model's window is ever substituted.
+
+Each compaction writes a row to `context_snapshots`: the summary, the previous snapshot, the oldest preserved request, the newest message the snapshot covers, the model, the reason, the prompt version, the tokens before and after, and the summariser's own usage and cost, which is also charged to the run. A later compaction updates the previous summary with only the messages added since it, rather than re-reading the conversation from the beginning.
+
+The transcript itself is never rewritten. Messages stay in Postgres and the console keeps showing all of them; only the context sent to the model is replaced. Resuming a chat loads the newest snapshot that belongs to the active message branch, so a snapshot written on an abandoned branch is never reused. A failed summarisation keeps the previous context and snapshot untouched, and a context-overflow error from OpenRouter compacts and retries the interrupted request once before the run fails.
+
 ## Interface
 
 Every screen follows [`docs/ui-guidelines.md`](docs/ui-guidelines.md): minimal text, one clear heading, one obvious primary action, and meaningful icons. Read it before adding a screen or writing user-facing copy.
