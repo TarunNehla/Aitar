@@ -63,7 +63,8 @@ const systemPrompt = [
   "- edit applies exact string replacements. write creates a file or replaces it completely.",
   "- bash runs a shell command from /workspace. The container has outbound internet access, so installs and network requests work without asking.",
   "- start_process, process_logs, and stop_process manage long-running commands such as dev servers. Never start those with bash.",
-  "- create_pull_request publishes this chat's branch and opens the pull request. It is the only way to push.",
+  "- create_pull_request publishes this chat's work and opens the pull request. It is the only way to push.",
+  "- switch_base_branch moves this chat onto another branch of the same repository, and only while the chat has no changes.",
   "- browser_navigate, browser_snapshot, browser_click, browser_type, browser_select, browser_press, browser_scroll, browser_wait, browser_screenshot, inspect_image, browser_console, and browser_close drive a real Chromium browser for this chat. Use them to run the application, navigate the interface, test user flows, read console errors, capture screenshots, and confirm visual results.",
   "",
   "Seeing the page:",
@@ -86,7 +87,12 @@ const systemPrompt = [
   "",
   "Working rules:",
   "- Make focused changes that satisfy the request, then verify them by running the project's tests or checks.",
-  "- Use git through bash for local inspection such as status, diff, and log. Do not configure remotes or credentials.",
+  "",
+  "Git rules:",
+  "- The checkout sits on a detached HEAD at the commit this chat started from. That is expected: this chat has no local branch and does not need one.",
+  "- The platform commits your work as checkpoints. Do not commit, branch, merge, rebase, reset, stash, or push yourself.",
+  "- Use git through bash for local inspection such as status, diff, log, and show. Do not configure remotes or credentials.",
+  "- Never use git checkout, git switch, or git branch to move the chat onto another branch. The platform tracks which branch this chat started from, and a bash checkout does not update it. Call switch_base_branch instead, and only when the user asks for another branch.",
   "- Stop any process you started once you no longer need it.",
   "- When the work is done, reply with a short summary of what changed instead of calling another tool.",
 ].join("\n");
@@ -333,17 +339,20 @@ export class AgentWorker {
     const cost = new RunCostAccount(run.max_cost_usd);
     let turns = 0;
     let parentMessageId = relation.session.currentLeafMessageId;
-    const runBaseCommit = relation.session.headCommit;
     let repositoryPath = "";
 
     const checkpoint = async () => {
-      if (!runBaseCommit || !repositoryPath) return null;
+      if (!repositoryPath) return null;
+      // Re-read the head: switch_base_branch can move it while the run is working.
+      const current = await getSession(relation.session.id);
+      const runBaseCommit = current?.session.headCommit ?? current?.session.baseCommit;
+      if (!runBaseCommit) return null;
       const result = await workspaceManager.checkpoint({
         chatId: relation.session.id,
         repositoryId: relation.repository.id,
         repositoryPath,
         runId: run.id,
-        baseCommit: runBaseCommit!,
+        baseCommit: runBaseCommit,
       });
       if (!result.createdCommit) return null;
       await saveCheckpoint({
@@ -364,26 +373,26 @@ export class AgentWorker {
 
     try {
       if (!config.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not configured");
-      if (!relation.session.baseCommit || !relation.session.headCommit) throw new Error("Chat environment is not ready");
 
       await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "starting" });
-      const location = await withRepositoryGitAccess({ repository: relation.repository }, (gitEnvironment) =>
+      const checkout = await withRepositoryGitAccess({ repository: relation.repository }, (gitEnvironment) =>
         workspaceManager.ensureChatCheckout({
           chatId: relation.session.id,
           repositoryId: relation.repository.id,
           repositoryUrl: relation.repository.repositoryUrl,
           baseBranch: relation.session.baseBranch,
-          branchName: relation.session.branchName,
-          headCommit: relation.session.headCommit as string,
-          legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
-            ? relation.session.settings.legacy_workspace_id
-            : undefined,
+          baseCommit: relation.session.baseCommit,
+          headCommit: relation.session.headCommit,
           gitEnvironment,
         }),
       );
-      repositoryPath = location.repository;
-      await workspaceManager.ensureSandbox(relation.session.id, repositoryPath);
-      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
+      repositoryPath = checkout.repository;
+      await updateSessionEnvironment({
+        sessionId: relation.session.id,
+        envStatus: "ready",
+        baseCommit: checkout.baseCommit,
+        headCommit: checkout.headCommit,
+      });
 
       const capability = await modelCapabilities.capabilityOf(run.model);
       await writer.emit("run_started", {

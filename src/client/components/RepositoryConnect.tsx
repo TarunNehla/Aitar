@@ -51,13 +51,12 @@ export function RepositoryConnect({
     setConnectError(null);
     setStage("Preparing the repository…");
     try {
-      const created = await api<{ repository: { id: string; defaultBranch: string } }>("/api/repositories", {
+      const created = await api<{ repository: { id: string } }>("/api/repositories", {
         method: "POST",
         body: JSON.stringify({
           installationId: input.installation.installationId,
           githubRepositoryId: input.repository.githubRepositoryId,
           name: input.repository.name,
-          defaultBranch: input.repository.defaultBranch,
         }),
       });
 
@@ -69,7 +68,6 @@ export function RepositoryConnect({
           body: JSON.stringify({
             title: "New session",
             ...(defaultModel ? { model: defaultModel } : {}),
-            baseBranch: created.repository.defaultBranch,
           }),
         },
       );
@@ -77,7 +75,7 @@ export function RepositoryConnect({
       setStage("Opening the chat…");
       await onCreated(session.session.id);
     } catch (reason) {
-      setConnectError(describeSetupError(reason, input.repository.defaultBranch));
+      setConnectError(describeSetupError(reason));
     } finally {
       setBusy(false);
       setStage(null);

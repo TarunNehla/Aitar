@@ -50,7 +50,6 @@ import {
   listSessions,
   markRunCancelling,
   updateRepositoryFetched,
-  updateSessionEnvironment,
   updateSessionTitle,
   type Access,
   type RepositoryRow,
@@ -58,27 +57,24 @@ import {
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
 import { activeRuns } from "./runtime/agent-runner.js";
-import { chatBranchName, validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
+import { validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
 
 const apiLogger = logger.child({ component: "api" });
 
 const publicRepositoryInput = z.object({
   name: z.string().trim().min(1).max(100),
   repositoryUrl: z.string().url(),
-  defaultBranch: z.string().trim().min(1).max(200).default("main"),
 });
 
 const githubRepositoryInput = z.object({
   installationId: z.coerce.number().int().positive(),
   githubRepositoryId: z.coerce.number().int().positive(),
   name: z.string().trim().min(1).max(100).optional(),
-  defaultBranch: z.string().trim().min(1).max(200).optional(),
 });
 
 const sessionInput = z.object({
   title: z.string().trim().min(1).max(120).default("New session"),
   model: z.string().trim().min(1).optional(),
-  baseBranch: z.string().trim().min(1).max(200).optional(),
 });
 
 const sessionTitleInput = z.object({
@@ -138,14 +134,27 @@ async function chatCheckout(relation: SessionRelation, userId: string) {
       repositoryId: relation.repository.id,
       repositoryUrl: relation.repository.repositoryUrl,
       baseBranch: relation.session.baseBranch,
-      branchName: relation.session.branchName,
-      headCommit: relation.session.headCommit as string,
-      legacyWorkspaceId: typeof relation.session.settings.legacy_workspace_id === "string"
-        ? relation.session.settings.legacy_workspace_id
-        : undefined,
+      baseCommit: relation.session.baseCommit,
+      headCommit: relation.session.headCommit,
       gitEnvironment,
     }),
   );
+}
+
+/** Git branches are the platform's business, so no response carries one. */
+function repositoryView(repository: RepositoryRow) {
+  const { defaultBranch, ...visible } = repository;
+  return visible;
+}
+
+function sessionView(session: SessionRelation["session"]) {
+  const { baseBranch, publishedBranch, ...visible } = session;
+  return visible;
+}
+
+function pullRequestView(pullRequest: Awaited<ReturnType<typeof listPullRequests>>[number]) {
+  const { headBranch, baseBranch, ...visible } = pullRequest;
+  return visible;
 }
 
 async function checkpointRange(relation: SessionRelation, request: Request, response: Response) {
@@ -256,7 +265,8 @@ export function createApi() {
   app.get(
     "/api/repositories",
     asyncRoute(async (request, response) => {
-      response.json({ repositories: await listRepositories(authenticatedUser(request).id) });
+      const repositories = await listRepositories(authenticatedUser(request).id);
+      response.json({ repositories: repositories.map(repositoryView) });
     }),
   );
 
@@ -299,13 +309,12 @@ export function createApi() {
 
         validateRepositoryUrl(selected.cloneUrl);
         const repositoryId = randomUUID();
-        const baseBranch = input.defaultBranch ?? selected.defaultBranch;
         const draft: RepositoryRow = {
           id: repositoryId,
           ownerUserId: user.id,
           name: input.name ?? selected.name,
           repositoryUrl: selected.cloneUrl,
-          defaultBranch: baseBranch,
+          defaultBranch: selected.defaultBranch,
           githubRepositoryId: selected.githubRepositoryId,
           githubInstallationId: installation.id,
           githubFullName: selected.fullName,
@@ -318,11 +327,11 @@ export function createApi() {
           updatedAt: new Date(),
         };
 
-        await withRepositoryGitAccess({ repository: draft, userId: user.id }, (gitEnvironment) =>
+        const prepared = await withRepositoryGitAccess({ repository: draft, userId: user.id }, (gitEnvironment) =>
           workspaceManager.prepareRepository({
             repositoryId,
             repositoryUrl: selected.cloneUrl,
-            baseBranch,
+            defaultBranch: selected.defaultBranch,
             gitEnvironment,
           }),
         );
@@ -332,7 +341,7 @@ export function createApi() {
           ownerUserId: user.id,
           name: draft.name,
           repositoryUrl: selected.cloneUrl,
-          defaultBranch: baseBranch,
+          defaultBranch: prepared.defaultBranch,
           githubRepositoryId: selected.githubRepositoryId,
           githubInstallationId: installation.id,
           githubFullName: selected.fullName,
@@ -341,21 +350,25 @@ export function createApi() {
           githubCloneUrl: selected.cloneUrl,
         });
         await updateRepositoryFetched(repository.id);
-        response.status(201).json({ repository });
+        response.status(201).json({ repository: repositoryView(repository) });
         return;
       }
 
       const input = publicRepositoryInput.parse(body);
       validateRepositoryUrl(input.repositoryUrl);
       const repositoryId = randomUUID();
-      await workspaceManager.prepareRepository({
+      const prepared = await workspaceManager.prepareRepository({
         repositoryId,
         repositoryUrl: input.repositoryUrl,
-        baseBranch: input.defaultBranch,
       });
-      const repository = await createRepository({ id: repositoryId, ownerUserId: user.id, ...input });
+      const repository = await createRepository({
+        id: repositoryId,
+        ownerUserId: user.id,
+        ...input,
+        defaultBranch: prepared.defaultBranch,
+      });
       await updateRepositoryFetched(repository.id);
-      response.status(201).json({ repository });
+      response.status(201).json({ repository: repositoryView(repository) });
     }),
   );
 
@@ -366,42 +379,15 @@ export function createApi() {
       const repository = await requireRepository(request, response);
       if (!repository) return;
 
-      const user = authenticatedUser(request);
-      const sessionId = randomUUID();
-      const baseBranch = input.baseBranch ?? repository.defaultBranch;
-      const branchName = chatBranchName(sessionId);
+      // A new chat is a database row. Its checkout and container wait until the agent needs them.
       const session = await createSession({
-        id: sessionId,
+        id: randomUUID(),
         repositoryId: repository.id,
         title: input.title,
         model: input.model,
-        baseBranch,
-        branchName,
+        baseBranch: repository.defaultBranch,
       });
-
-      try {
-        const prepared = await withRepositoryGitAccess({ repository, userId: user.id }, (gitEnvironment) =>
-          workspaceManager.prepareChat({
-            chatId: sessionId,
-            repositoryId: repository.id,
-            repositoryUrl: repository.repositoryUrl,
-            baseBranch,
-            branchName,
-            gitEnvironment,
-          }),
-        );
-        const ready = await updateSessionEnvironment({
-          sessionId,
-          envStatus: "ready",
-          baseCommit: prepared.baseCommit,
-          headCommit: prepared.headCommit,
-        });
-        await updateRepositoryFetched(repository.id);
-        response.status(201).json({ session: ready });
-      } catch (error) {
-        await updateSessionEnvironment({ sessionId, envStatus: "failed" });
-        throw error;
-      }
+      response.status(201).json({ session: sessionView(session) });
     }),
   );
 
@@ -409,7 +395,13 @@ export function createApi() {
     "/api/sessions",
     asyncRoute(async (request, response) => {
       const repositoryId = typeof request.query.repositoryId === "string" ? request.query.repositoryId : undefined;
-      response.json({ sessions: await listSessions(authenticatedUser(request).id, repositoryId) });
+      const sessions = await listSessions(authenticatedUser(request).id, repositoryId);
+      response.json({
+        sessions: sessions.map((entry) => ({
+          session: sessionView(entry.session),
+          repository: repositoryView(entry.repository),
+        })),
+      });
     }),
   );
 
@@ -420,12 +412,18 @@ export function createApi() {
       if (!relation) return;
 
       const sessionId = relation.session.id;
-      const [sessionMessages, sessionRuns, pullRequests] = await Promise.all([
+      const [sessionMessages, sessionRuns, published] = await Promise.all([
         getActiveBranchMessages(sessionId),
         listSessionRuns(sessionId),
         listPullRequests(sessionId),
       ]);
-      response.json({ ...relation, messages: sessionMessages, runs: sessionRuns, pullRequests });
+      response.json({
+        session: sessionView(relation.session),
+        repository: repositoryView(relation.repository),
+        messages: sessionMessages,
+        runs: sessionRuns,
+        pullRequests: published.map(pullRequestView),
+      });
     }),
   );
 
@@ -437,7 +435,7 @@ export function createApi() {
       if (!relation) return;
 
       const session = await updateSessionTitle(relation.session.id, input.title);
-      response.json({ session });
+      response.json({ session: sessionView(session) });
     }),
   );
 
@@ -652,8 +650,10 @@ export function createApi() {
         return;
       }
 
-      const repositories = await githubApp.listInstallationRepositories(installationId);
-      response.json({ repositories });
+      const available = await githubApp.listInstallationRepositories(installationId);
+      response.json({
+        repositories: available.map(({ defaultBranch, ...repository }) => repository),
+      });
     }),
   );
 

@@ -42,21 +42,16 @@ describe("repositoryNameFromUrl", () => {
 describe("describeSetupError", () => {
   it("explains an unreachable private repository", () => {
     const error = new Error("fatal: could not read Username for 'https://github.com': terminal prompts disabled");
-    expect(describeSetupError(error, "main")).toMatch(/private/);
+    expect(describeSetupError(error)).toMatch(/private/);
   });
 
   it("explains a missing repository", () => {
     const error = new Error("remote: Repository not found.\nfatal: repository not found");
-    expect(describeSetupError(error, "main")).toMatch(/could not be found/);
-  });
-
-  it("names the branch that is missing", () => {
-    const error = new Error("fatal: ambiguous argument 'refs/remotes/origin/release^{commit}': unknown revision");
-    expect(describeSetupError(error, "release")).toContain("release");
+    expect(describeSetupError(error)).toMatch(/could not be found/);
   });
 
   it("falls back to the first line of an unrecognised failure", () => {
     const error = new Error("fatal: something else went wrong\nsecond line");
-    expect(describeSetupError(error, "main")).toBe("fatal: something else went wrong");
+    expect(describeSetupError(error)).toBe("fatal: something else went wrong");
   });
 });

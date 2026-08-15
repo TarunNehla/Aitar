@@ -110,6 +110,35 @@ describe("repository onboarding", () => {
     expect(screen.getByRole("button", { name: "Open repository" })).toBeDefined();
   });
 
+  it("asks for no branch anywhere in onboarding", async () => {
+    openOnboarding();
+    fireEvent.click(screen.getByText("Open public repository URL"));
+    await waitFor(() => expect(screen.getByLabelText("Repository URL")).toBeDefined());
+    fireEvent.click(screen.getByText("Options"));
+
+    expect(screen.queryByLabelText("Base branch")).toBeNull();
+    expect(document.querySelector("input[name='baseBranch']")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/branch/i);
+  });
+
+  it("shows no branch beside a GitHub repository and sends none when connecting", async () => {
+    openOnboarding();
+    fireEvent.click(screen.getByText("Connect GitHub repository"));
+    await waitFor(() => expect(screen.getByText("acme/console")).toBeDefined());
+
+    expect(document.querySelector(".branch-label")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/branch/i);
+
+    fireEvent.click(screen.getByText("acme/console"));
+    await waitFor(() => expect(apiMock.mock.calls.some(([path]) => path === "/api/repositories")).toBe(true));
+
+    for (const [path, options] of apiMock.mock.calls as Array<[string, RequestInit | undefined]>) {
+      if (!options?.body) continue;
+      expect(Object.keys(JSON.parse(String(options.body))), path).not.toContain("defaultBranch");
+      expect(Object.keys(JSON.parse(String(options.body))), path).not.toContain("baseBranch");
+    }
+  });
+
   it("offers a visible back action from every step", async () => {
     openOnboarding();
     fireEvent.click(screen.getByText("Connect GitHub repository"));

@@ -1,7 +1,14 @@
-import { getSession, savePullRequest, saveCheckpoint, updateSessionHead } from "../db/store.js";
+import {
+  getSession,
+  savePullRequest,
+  saveCheckpoint,
+  saveSessionPublishedBranch,
+  updateSessionHead,
+} from "../db/store.js";
 import { githubApp, type GitHubAppClient, type GitHubPullRequest } from "../github/app.js";
 import { withRepositoryPullRequestAccess } from "../github/repository-access.js";
 import { logger } from "../logger.js";
+import { pullRequestBranchName } from "./branch-name.js";
 import type { EventWriter } from "./event-writer.js";
 import { runChecked } from "./process.js";
 import { validateBranchName, workspaceManager } from "./workspace-manager.js";
@@ -27,14 +34,15 @@ function ownerAndRepository(fullName: string): { owner: string; repository: stri
 }
 
 /**
- * The model chooses only the title, body, and draft flag. Everything that
- * decides *where* the change lands is derived from the chat on the backend.
+ * The model words the branch, the platform places it, and a chat that has already
+ * published keeps the branch it claimed no matter what the model proposes later.
  */
 export async function createPullRequestForChat(input: {
   sessionId: string;
   runId: string;
   repositoryPath: string;
   title: string;
+  branchName?: string;
   body?: string;
   draft?: boolean;
   writer: EventWriter;
@@ -47,7 +55,10 @@ export async function createPullRequestForChat(input: {
   if (!repository.ownerUserId) throw new Error("This repository has no owner");
   if (!session.baseCommit) throw new Error("This chat environment is not ready");
 
-  const headBranch = validateBranchName(session.branchName);
+  const headBranch = validateBranchName(
+    session.publishedBranch ??
+      pullRequestBranchName({ chatId: session.id, proposedName: input.branchName, title: input.title }),
+  );
   const baseBranch = validateBranchName(session.baseBranch);
   const { owner, repository: repositoryName } = ownerAndRepository(repository.githubFullName ?? "");
 
@@ -94,7 +105,8 @@ export async function createPullRequestForChat(input: {
         ],
         { cwd: input.repositoryPath, env: gitEnvironment, timeoutMs: 180_000 },
       );
-      await input.writer.emit("branch_published", { branch: headBranch, commit: headCommit });
+      // The branch belongs to GitHub's page, not to Aitar's, so only the commit travels.
+      await input.writer.emit("branch_published", { commit: headCommit });
 
       const existing = await client.findPullRequest({
         installationToken: token,
@@ -119,6 +131,7 @@ export async function createPullRequestForChat(input: {
     },
   );
 
+  if (session.publishedBranch !== headBranch) await saveSessionPublishedBranch(session.id, headBranch);
   await savePullRequest({
     sessionId: session.id,
     repositoryId: repository.id,
@@ -150,8 +163,6 @@ export async function createPullRequestForChat(input: {
     state: outcome.state,
     draft: outcome.draft,
     title: outcome.title,
-    headBranch: outcome.headBranch,
-    baseBranch: outcome.baseBranch,
     reused: outcome.reused,
   });
   pullRequestLogger.info(

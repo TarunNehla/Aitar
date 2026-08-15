@@ -410,8 +410,6 @@ export function persistedToolSummary(input: {
         state: metadataPreview(details.state, 20),
         draft: Boolean(details.draft),
         title: metadataPreview(details.title ?? args.title, 240),
-        headBranch: metadataPreview(details.headBranch, 200),
-        baseBranch: metadataPreview(details.baseBranch, 200),
         reused,
       },
     };

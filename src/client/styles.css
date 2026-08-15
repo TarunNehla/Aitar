@@ -549,19 +549,6 @@ button:disabled { cursor: not-allowed; }
 .composer-actions-start { display: flex; align-items: center; gap: var(--space-5); flex: 1 1 auto; min-width: 0; }
 .composer-actions-end { display: flex; align-items: center; gap: var(--space-4); flex: none; margin-left: auto; }
 
-.composer-branch {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-  max-width: 240px;
-  color: var(--text-faint);
-  font: var(--type-code);
-  font-size: var(--text-xs);
-}
-.composer-branch svg { flex: none; }
-.composer-branch span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 .model-select { position: relative; display: inline-flex; align-items: center; min-width: 0; }
 .model-select select {
   appearance: none;
@@ -781,26 +768,6 @@ button:disabled { cursor: not-allowed; }
   font-size: var(--text-lg);
   font-weight: var(--weight-semibold);
 }
-.pull-request-branches {
-  display: flex;
-  align-items: center;
-  gap: var(--space-5);
-  flex-wrap: wrap;
-  color: var(--text-faint);
-}
-.pull-request-branches code {
-  max-width: 220px;
-  overflow: hidden;
-  padding: 2px var(--space-3);
-  color: var(--text-body);
-  background: var(--surface-sunken);
-  border-radius: var(--radius-xs);
-  font: var(--type-code);
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .toast {
   position: absolute;
   left: 50%;
@@ -921,7 +888,6 @@ button:disabled { cursor: not-allowed; }
 .setup-form input::placeholder { color: var(--text-faint); }
 .setup-form input:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
 .setup-form input:disabled { color: var(--text-muted); background: var(--surface-sunken); }
-.field-row { display: grid; grid-template-columns: 1fr 1.7fr; gap: var(--space-6); }
 .setup-actions { display: grid; }
 .setup-actions .primary-button { height: var(--control-height-lg); font-size: var(--text-md); }
 
@@ -1390,8 +1356,6 @@ button:disabled { cursor: not-allowed; }
   .messages { padding: var(--space-8) var(--space-7); }
   .changes-header { flex-wrap: wrap; }
   .composer { margin: 0 var(--space-7) var(--space-7); }
-  .composer-branch { max-width: 150px; }
-  .field-row { grid-template-columns: 1fr; }
   .dialog-overlay { padding: var(--space-7); }
   .dialog-header { padding: var(--space-7) var(--space-7) var(--space-5); }
   .dialog-body { padding: 0 var(--space-7) var(--space-7); }

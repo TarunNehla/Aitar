@@ -4,7 +4,7 @@ Cloud Agents is a browser-based coding agent.
 
 It keeps ongoing chats connected to repositories.
 
-Each chat owns an independent Git branch, checkout, and sandbox environment.
+Each chat owns an independent checkout and sandbox environment.
 
 Pi Agent Core runs the agent loop.
 
@@ -27,7 +27,7 @@ Docker isolates repository commands.
 - Every agent file operation and command runs inside the chat's container, with the repository at `/workspace`.
 - Docker CPU, memory, process, capability, disk, and time limits applied as invisible platform boundaries.
 - Outbound internet in containers by default. No chat permission prompts.
-- One internal Git branch and local clone per chat.
+- One detached-HEAD local clone per chat, created the first time the agent needs the repository.
 - Git checkpoint commits at the end of each run.
 - Diffs generated from Git on demand instead of stored patch artifacts.
 - Safe Postgres run claiming with `FOR UPDATE SKIP LOCKED`.
@@ -260,7 +260,7 @@ Create the app under Settings, Developer settings, GitHub Apps.
 | Account permission | Email addresses: Read-only |
 | Subscribed events | Installation, Installation repositories |
 
-These three repository permissions are the complete set Cloud Agents uses. Contents write and pull requests write exist only so `create_pull_request` can push the chat branch and open its pull request. Nothing else is requested.
+These three repository permissions are the complete set Cloud Agents uses. Contents write and pull requests write exist only so `create_pull_request` can push the chat's checkpoint commit and open its pull request. Nothing else is requested.
 
 Changing permissions on an existing GitHub App is a manual step: update the app under Settings, Developer settings, GitHub Apps, Permissions and events, then accept the new permissions on every existing installation. GitHub emails installation owners a review request, and the app keeps the old permissions on an installation until its owner approves. Token minting for a pull request fails with a clear error until that approval lands.
 
@@ -307,9 +307,11 @@ pnpm db:validate
 
 `create_pull_request` is a backend tool. It never runs in Docker and the container never sees a GitHub token.
 
-The model supplies only a title, an optional body, and an optional draft flag. The backend derives the repository, installation, base branch, chat branch, checkout path, and checkpoint commit from the chat itself, so the model cannot target another repository or head branch.
+The model supplies only a title, an optional body, and an optional draft flag. The backend derives the repository, installation, base branch, remote branch, checkout path, and checkpoint commit from the chat itself, so the model cannot target another repository or head branch.
 
-The tool verifies repository ownership, writes a final Git checkpoint, mints a short-lived installation token, pushes that exact checkpoint commit to the chat branch, and creates the pull request through the GitHub API. Calling it again returns the existing pull request instead of opening a second one.
+The tool verifies repository ownership, writes a final Git checkpoint, mints a short-lived installation token, pushes that exact checkpoint commit to a remote branch, and creates the pull request through the GitHub API. Calling it again reuses the same remote branch and returns the existing pull request instead of opening a second one.
+
+Publishing is the only moment a chat gets a branch. The name is derived from the first request and a short chat-id suffix, such as `agent/fix-login-screen-78a2a00d`, and no model is asked to choose it. The commit is pushed straight from the checkpoint SHA, so the branch and the checkpoint always name the same commit and the branch is never checked out locally.
 
 Neon stores only the number, URL, state, draft flag, title, both branch names, and the published commit.
 
@@ -363,11 +365,13 @@ Run one active agent at a time with `MAX_ACTIVE_RUNS=1` for the cheapest V0 depl
 
 ## Checkpoint design
 
-Each chat uses a local branch named `agent/<chat-id>`.
+A chat has no local branch. Creating one writes a database row and nothing else.
 
 The host keeps one protected bare mirror under `repos/<repository-id>.git`.
 
-Each chat gets a separate local clone under `chats/<chat-id>/repository`.
+The first time the agent needs the repository, the mirror is updated, the base branch is resolved to an exact commit, and the chat gets a separate local clone under `chats/<chat-id>/repository` checked out at that commit with a detached HEAD.
+
+`switch_base_branch` re-creates that checkout at another branch, and only while the chat has no changes. Existing work is never rebased, transferred, or discarded.
 
 At the end of a run, the worker stages every non-ignored change.
 
@@ -375,9 +379,11 @@ It creates an internal commit without running repository Git hooks.
 
 It stores the commit SHA and base SHA in Neon.
 
-It pushes the resulting commit into `refs/cloud-agents/chats/<chat-id>` in the mirror.
+It pushes the resulting commit into `refs/cloud-agents/chats/<chat-id>` in the mirror, which is the durable record of the chat's work. HEAD stays detached at the checkpoint.
 
 Neon stores only the base commit, checkpoint commit, and internal ref.
+
+A chat that was evicted is restored by checking that checkpoint out again, still detached.
 
 The UI requests a Git diff only when it needs to display code changes.
 

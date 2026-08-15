@@ -23,7 +23,6 @@ interface Repository {
   id: string;
   name: string;
   repositoryUrl: string;
-  defaultBranch: string;
 }
 
 interface SessionListItem {
@@ -33,8 +32,6 @@ interface SessionListItem {
     repositoryId: string;
     defaultModel: string;
     status: string;
-    branchName: string;
-    baseBranch: string;
     baseCommit: string | null;
     headCommit: string | null;
     envStatus: string;
@@ -58,8 +55,6 @@ interface PullRequestSummary {
   state: string;
   draft: boolean;
   title: string;
-  headBranch: string;
-  baseBranch: string;
 }
 
 type TimelineItem =
@@ -99,7 +94,6 @@ const agentStatuses = [
 const agentStatusInterval = 2_400;
 const workspaceRoot = "/workspace";
 const repositoryRootLabel = "repository";
-const branchDisplayLimit = 22;
 
 /** Frontend-only until models are managed server side. */
 const modelOptions = [{ value: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash" }];
@@ -108,12 +102,6 @@ const modelOptions = [{ value: "deepseek/deepseek-v4-flash-0731", label: "DeepSe
 function repositoryPath(value: string): string {
   const path = value.startsWith(`${workspaceRoot}/`) ? value.slice(workspaceRoot.length + 1) : value;
   return path === workspaceRoot || path === "" || path === "." ? repositoryRootLabel : path;
-}
-
-function shortBranchName(branch: string): string {
-  if (branch.length <= branchDisplayLimit) return branch;
-  const separator = branch.lastIndexOf("/");
-  return `${branch.slice(0, separator + 1)}${branch.slice(separator + 1, separator + 9)}…`;
 }
 
 function relativeTime(value: string | undefined): string {
@@ -453,7 +441,6 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "tool_started",
     "file_changed",
     "checkpoint_saved",
-    "branch_published",
     "vision_capability_fallback",
   ]);
 
@@ -810,12 +797,12 @@ function Console({
     [sessions, selectedId],
   );
   const activeRun = useMemo(() => detail?.runs.find((run) => activeStatuses.has(run.status)), [detail]);
-  // A ready session says nothing; only the states worth acting on get a line.
+  // A ready session says nothing, and neither does one whose environment has not been needed yet.
   const sessionStatus = useMemo(() => {
     if (!detail) return null;
     if (detail.session.envStatus === "failed") return { tone: "error", label: "Environment failed" };
     if (streamDropped) return { tone: "error", label: "Disconnected" };
-    if (detail.session.envStatus !== "ready") return { tone: "working", label: "Preparing" };
+    if (!["ready", "idle"].includes(detail.session.envStatus)) return { tone: "working", label: "Preparing" };
     if (activeRun) return { tone: "working", label: sentenceCase(activeRun.status) };
     return null;
   }, [activeRun, detail, streamDropped]);
@@ -898,13 +885,7 @@ function Console({
                   onClick={async () => {
                     const result = await api<{ session: { id: string } }>(
                       `/api/repositories/${group.repository.id}/chats`,
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          title: defaultSessionTitle,
-                          baseBranch: group.repository.defaultBranch,
-                        }),
-                      },
+                      { method: "POST", body: JSON.stringify({ title: defaultSessionTitle }) },
                     );
                     await loadSessions();
                     setSelectedId(result.session.id);
@@ -944,7 +925,6 @@ function Console({
                     body: JSON.stringify({
                       title: defaultSessionTitle,
                       model: selectedItem.session.defaultModel,
-                      baseBranch: selectedItem.repository.defaultBranch,
                     }),
                   },
                 );
@@ -1087,7 +1067,6 @@ function Console({
 
             <Composer
               working={Boolean(activeRun)}
-              branchName={detail.session.branchName}
               model={detail.session.defaultModel}
               status={sessionStatus}
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
@@ -1196,8 +1175,6 @@ function Message({
           title={persisted?.title ?? String(block.data.title ?? "")}
           state={persisted?.state ?? String(block.data.state ?? "open")}
           draft={persisted?.draft ?? Boolean(block.data.draft)}
-          headBranch={persisted?.headBranch ?? String(block.data.headBranch ?? "")}
-          baseBranch={persisted?.baseBranch ?? String(block.data.baseBranch ?? "")}
         />
       );
     }
@@ -1276,16 +1253,12 @@ function PullRequestCard({
   title,
   state,
   draft,
-  headBranch,
-  baseBranch,
 }: {
   url: string;
   number: number;
   title: string;
   state: string;
   draft: boolean;
-  headBranch: string;
-  baseBranch: string;
 }) {
   const tone = draft && state === "open" ? "draft" : state;
   const label = draft && state === "open" ? "Draft" : sentenceCase(state);
@@ -1304,11 +1277,6 @@ function PullRequestCard({
         </span>
       </div>
       {title && <div className="pull-request-title">{title}</div>}
-      <div className="pull-request-branches">
-        <code>{headBranch}</code>
-        <Icon name="arrow-right" size={14} />
-        <code>{baseBranch}</code>
-      </div>
     </a>
   );
 }
@@ -1345,15 +1313,6 @@ function MarkdownText({ children }: { children: string }) {
   );
 }
 
-function BranchChip({ branchName }: { branchName: string }) {
-  return (
-    <span className="composer-branch" title={branchName}>
-      <Icon name="git-branch" size={14} />
-      <span>{shortBranchName(branchName)}</span>
-    </span>
-  );
-}
-
 /** One option today, but a real select so the list can grow without a redesign. */
 function ModelSelect({ model }: { model: string }) {
   const [selected, setSelected] = useState(model);
@@ -1378,14 +1337,12 @@ function ModelSelect({ model }: { model: string }) {
 
 function Composer({
   working,
-  branchName,
   model,
   status,
   onSend,
   onCancel,
 }: {
   working: boolean;
-  branchName: string;
   model: string;
   status: { tone: string; label: string } | null;
   onSend: (text: string) => Promise<void>;
@@ -1426,7 +1383,6 @@ function Composer({
         />
         <div className="composer-actions">
           <div className="composer-actions-start">
-            <BranchChip branchName={branchName} />
             {status && (
               <span className={`composer-status ${status.tone}`}>
                 <span className="composer-status-dot" />
@@ -1508,10 +1464,6 @@ function TimelineEvent({
       (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
     );
     detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
-  } else if (event.type === "branch_published") {
-    icon = "git-branch";
-    verb = "Published branch";
-    code = String(event.payload.branch ?? "");
   }
 
   if (event.type === "tool_started" && liveOutput) {

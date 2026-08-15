@@ -1,5 +1,5 @@
 {
-  "id": "da90301c-a067-4e40-9b8f-a8022cb1b8aa",
+  "id": "21923315-ec43-48d5-8d77-5e2f903e8772",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -504,11 +504,11 @@
           "notNull": true,
           "default": "'main'"
         },
-        "branch_name": {
-          "name": "branch_name",
+        "published_branch": {
+          "name": "published_branch",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "base_commit": {
           "name": "base_commit",
@@ -527,7 +527,7 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true,
-          "default": "'preparing'"
+          "default": "'idle'"
         },
         "last_active_at": {
           "name": "last_active_at",
@@ -613,8 +613,8 @@
           "method": "btree",
           "with": {}
         },
-        "sessions_repository_branch_idx": {
-          "name": "sessions_repository_branch_idx",
+        "sessions_published_branch_idx": {
+          "name": "sessions_published_branch_idx",
           "columns": [
             {
               "expression": "repository_id",
@@ -623,13 +623,14 @@
               "nulls": "last"
             },
             {
-              "expression": "branch_name",
+              "expression": "published_branch",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             }
           ],
           "isUnique": true,
+          "where": "\"chat_sessions\".\"published_branch\" IS NOT NULL",
           "concurrently": false,
           "method": "btree",
           "with": {}

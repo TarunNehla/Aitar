@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { config } from "../config.js";
 import { logger } from "../logger.js";
+import { switchChatBaseBranch } from "./base-branch.js";
 import { createBrowserTools } from "./browser-tools.js";
 import type { EventWriter } from "./event-writer.js";
 import { createPullRequestForChat } from "./pull-request.js";
@@ -287,14 +288,50 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     },
   };
 
+  const switchBaseBranch: AgentTool = {
+    name: "switch_base_branch",
+    label: "switch base branch",
+    description:
+      "Start this chat from a different branch of the same repository. " +
+      "Use it only when the user explicitly asks to work from another branch, and never as a way to inspect one. " +
+      "The platform re-creates the checkout at that branch, so it works only while the chat has no changes yet. " +
+      "A git checkout in bash does not change where this chat's work belongs.",
+    parameters: Type.Object({
+      branch: Type.String({ minLength: 1, maxLength: 200, description: "Existing branch in this repository" }),
+    }),
+    executionMode: "sequential",
+    execute: async (_callId, params: any) => {
+      const outcome = await switchChatBaseBranch({
+        sessionId: context.sessionId,
+        branch: String(params.branch),
+      });
+      toolLogger.info({ baseBranch: outcome.baseBranch, changed: outcome.changed }, "Chat base branch requested");
+      return textResult(
+        outcome.changed
+          ? `This chat now starts from ${outcome.baseBranch}. The checkout was re-created, so any process you started has stopped.`
+          : `This chat already starts from ${outcome.baseBranch}.`,
+        { changed: outcome.changed },
+      );
+    },
+  };
+
   const createPullRequest: AgentTool = {
     name: "create_pull_request",
     label: "create pull request",
     description:
-      "Publish this chat's branch and open a pull request against the repository's base branch. " +
-      "The repository, branches, and commit are fixed by the platform. Calling this again returns the existing pull request.",
+      "Publish this chat's work and open a pull request against the branch it started from. " +
+      "The platform picks the repository and the commit, and places the branch you name. " +
+      "Calling this again updates the same branch and returns the existing pull request.",
     parameters: Type.Object({
       title: Type.String({ minLength: 1, maxLength: 240, description: "Pull request title" }),
+      branchName: Type.String({
+        minLength: 1,
+        maxLength: 80,
+        description:
+          "Short kebab-case name for the change, such as fix-login-screen-flicker. Describe what the diff does, " +
+          "not what the conversation was about. The platform namespaces it and appends a chat suffix, and ignores " +
+          "it once this chat has already published.",
+      }),
       body: Type.Optional(Type.String({ maxLength: 60_000, description: "Pull request description in Markdown" })),
       draft: Type.Optional(Type.Boolean({ description: "Open the pull request as a draft" })),
     }),
@@ -305,24 +342,20 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
         runId: context.runId,
         repositoryPath: context.repositoryPath,
         title: String(params.title),
+        branchName: String(params.branchName),
         body: params.body === undefined ? undefined : String(params.body),
         draft: Boolean(params.draft),
         writer: context.writer,
       });
       const verb = outcome.reused ? "Reused existing pull request" : "Created pull request";
-      return textResult(
-        `${verb} #${outcome.number}: ${outcome.url} (${outcome.headBranch} into ${outcome.baseBranch}).`,
-        {
-          number: outcome.number,
-          url: outcome.url,
-          state: outcome.state,
-          draft: outcome.draft,
-          title: outcome.title,
-          headBranch: outcome.headBranch,
-          baseBranch: outcome.baseBranch,
-          reused: outcome.reused,
-        },
-      );
+      return textResult(`${verb} #${outcome.number}: ${outcome.url}`, {
+        number: outcome.number,
+        url: outcome.url,
+        state: outcome.state,
+        draft: outcome.draft,
+        title: outcome.title,
+        reused: outcome.reused,
+      });
     },
   };
 
@@ -347,6 +380,7 @@ export function createAgentTools(context: ToolContext): AgentTool[] {
     startProcess,
     processLogs,
     stopProcess,
+    switchBaseBranch,
     createPullRequest,
     ...browser,
   ];

@@ -33,7 +33,7 @@ function firstLine(message: string): string {
   return line.length > 180 ? `${line.slice(0, 179)}…` : line;
 }
 
-export function describeSetupError(reason: unknown, baseBranch: string): string {
+export function describeSetupError(reason: unknown): string {
   const message = reason instanceof Error ? reason.message : String(reason);
   const lowered = message.toLowerCase();
 
@@ -42,9 +42,6 @@ export function describeSetupError(reason: unknown, baseBranch: string): string 
   }
   if (lowered.includes("repository not found") || lowered.includes("not found")) {
     return "That repository could not be found. Check the owner and repository name";
-  }
-  if (lowered.includes("unknown revision") || lowered.includes("ambiguous argument")) {
-    return `Branch ${baseBranch} is not in that repository. Pick a branch that exists`;
   }
   if (lowered.includes("could not resolve host") || lowered.includes("failed to connect")) {
     return "GitHub could not be reached. Check the connection and try again";

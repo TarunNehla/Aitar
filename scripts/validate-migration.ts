@@ -73,6 +73,13 @@ try {
     if (!ownerColumn) throw new Error("repositories.owner_user_id is missing");
     if (ownerColumn.is_nullable !== "NO") throw new Error("repositories.owner_user_id must be required");
 
+    const [publishedBranch] = await transaction.unsafe<Array<{ is_nullable: string }>>(`
+      SELECT is_nullable FROM information_schema.columns
+      WHERE table_schema = '${schemaName}' AND table_name = 'chat_sessions' AND column_name = 'published_branch'
+    `);
+    if (!publishedBranch) throw new Error("chat_sessions.published_branch is missing");
+    if (publishedBranch.is_nullable !== "YES") throw new Error("an unpublished chat must not need a branch name");
+
     const tokenColumns = await transaction.unsafe<Array<{ table_name: string; column_name: string }>>(`
       SELECT table_name, column_name FROM information_schema.columns
       WHERE table_schema = '${schemaName}'
@@ -88,11 +95,10 @@ try {
         '00000000-0000-0000-0000-000000000001', 'user-1', 'Example',
         'https://github.com/example/repository'
       );
-      INSERT INTO chat_sessions (id, repository_id, branch_name, default_model)
+      INSERT INTO chat_sessions (id, repository_id, default_model)
       VALUES (
         '00000000-0000-0000-0000-000000000002',
         '00000000-0000-0000-0000-000000000001',
-        'agent/00000000-0000-0000-0000-000000000002',
         'example/model'
       );
     `);

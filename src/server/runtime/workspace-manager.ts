@@ -45,6 +45,12 @@ export interface ChatLocation {
   repository: string;
 }
 
+export interface ChatCheckout extends ChatLocation {
+  baseCommit: string;
+  headCommit: string;
+  created: boolean;
+}
+
 export function repositoryMirrorPath(repositoryId: string): string {
   return join(config.WORKSPACE_ROOT, "repos", `${repositoryId}.git`);
 }
@@ -52,10 +58,6 @@ export function repositoryMirrorPath(repositoryId: string): string {
 export function chatLocation(chatId: string): ChatLocation {
   const root = join(config.WORKSPACE_ROOT, "chats", chatId);
   return { root, repository: join(root, "repository") };
-}
-
-export function chatBranchName(chatId: string): string {
-  return `agent/${chatId}`;
 }
 
 export function chatInternalRef(chatId: string): string {
@@ -101,108 +103,111 @@ export interface RemoteGitAccess {
 }
 
 export class WorkspaceManager {
-  async prepareRepository(input: RemoteGitAccess & { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
-    const baseCommit = await this.ensureMirror(input);
-    return { mirrorPath: repositoryMirrorPath(input.repositoryId), baseCommit };
-  }
-
-  async prepareChat(input: RemoteGitAccess & {
-    chatId: string;
+  async prepareRepository(input: RemoteGitAccess & {
     repositoryId: string;
     repositoryUrl: string;
-    baseBranch: string;
-    branchName: string;
+    defaultBranch?: string;
   }) {
-    const startedAt = Date.now();
-    validateBranchName(input.baseBranch);
-    validateBranchName(input.branchName);
-    const baseCommit = await this.ensureMirror(input);
-    const location = chatLocation(input.chatId);
-    const mirrorPath = repositoryMirrorPath(input.repositoryId);
-    await mkdir(location.root, { recursive: true });
-
-    await hostGit(["clone", "--local", "--no-checkout", "--", mirrorPath, location.repository]);
-    await hostGit(["checkout", "-b", input.branchName, baseCommit], { cwd: location.repository });
-    await hostGit(["config", "user.name", "Cloud Agent"], { cwd: location.repository });
-    await hostGit(["config", "user.email", "cloud-agent@local"], { cwd: location.repository });
-    await this.ensurePlatformGitExcludes(location.repository);
-    await hostGit(["update-ref", chatInternalRef(input.chatId), baseCommit], { cwd: mirrorPath });
-
-    workspaceLogger.info(
-      { chatId: input.chatId, repositoryId: input.repositoryId, durationMs: Date.now() - startedAt },
-      "Chat checkout prepared",
-    );
-    return { ...location, baseCommit, headCommit: baseCommit };
+    const mirrorPath = await this.ensureMirror(input);
+    const defaultBranch = input.defaultBranch
+      ? validateBranchName(input.defaultBranch)
+      : await this.remoteDefaultBranch(mirrorPath, input.gitEnvironment);
+    const baseCommit = await this.branchCommit(mirrorPath, defaultBranch);
+    return { mirrorPath, defaultBranch, baseCommit };
   }
 
+  /** Fetches the mirror and answers where the requested base branch currently points. */
+  async resolveBaseBranch(input: RemoteGitAccess & {
+    repositoryId: string;
+    repositoryUrl: string;
+    branch: string;
+  }): Promise<string> {
+    const branch = validateBranchName(input.branch);
+    const mirrorPath = await this.ensureMirror(input);
+    return this.branchCommit(mirrorPath, branch);
+  }
+
+  async checkoutExists(chatId: string): Promise<boolean> {
+    try {
+      await stat(join(chatLocation(chatId).repository, ".git"));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Creates the chat's disposable checkout the first time the agent needs the
+   * repository, and restores it at the stored checkpoint after an eviction.
+   * The checkout always sits on a detached HEAD: a chat owns commits, never a branch.
+   */
   async ensureChatCheckout(input: RemoteGitAccess & {
     chatId: string;
     repositoryId: string;
     repositoryUrl: string;
     baseBranch: string;
-    branchName: string;
-    headCommit: string;
-    legacyWorkspaceId?: string;
-  }): Promise<ChatLocation> {
+    baseCommit?: string | null;
+    headCommit?: string | null;
+  }): Promise<ChatCheckout> {
+    const startedAt = Date.now();
     const location = chatLocation(input.chatId);
-    try {
-      await stat(join(location.repository, ".git"));
-      return location;
-    } catch {
-      // Restore the disposable checkout from the protected repository mirror.
+    const present = await this.checkoutExists(input.chatId);
+    if (present && input.baseCommit && input.headCommit) {
+      return { ...location, baseCommit: input.baseCommit, headCommit: input.headCommit, created: false };
     }
+    if (present) await this.discardChatCheckout(input.chatId);
 
     const mirrorPath = repositoryMirrorPath(input.repositoryId);
+    const baseBranch = validateBranchName(input.baseBranch);
+    let mirrored = true;
     try {
       await stat(join(mirrorPath, "HEAD"));
     } catch {
-      await this.ensureMirror(input);
+      mirrored = false;
     }
+    if (!mirrored || !input.baseCommit) await this.ensureMirror(input);
+    const baseCommit = input.baseCommit || (await this.branchCommit(mirrorPath, baseBranch));
+
     const ref = chatInternalRef(input.chatId);
-    let restoreCommit = input.headCommit;
-    try {
-      restoreCommit = (await hostGit(["rev-parse", `${ref}^{commit}`], { cwd: mirrorPath })).stdout.trim();
-    } catch {
-      try {
-        await hostGit(["cat-file", "-e", `${input.headCommit}^{commit}`], { cwd: mirrorPath });
-      } catch {
-        if (!input.legacyWorkspaceId) throw new Error("Chat checkpoint is missing from the repository mirror");
-        const candidates = [
-          join(config.WORKSPACE_ROOT, "workspaces", input.legacyWorkspaceId, "repository"),
-          join(config.WORKSPACE_ROOT, input.legacyWorkspaceId, "repository"),
-        ];
-        let imported = false;
-        for (const legacyRepository of candidates) {
-          try {
-            await stat(join(legacyRepository, ".git"));
-            await hostGit(
-              ["-c", "protocol.file.allow=always", "fetch", "--no-tags", legacyRepository, `${input.headCommit}:${ref}`],
-              { cwd: mirrorPath },
-            );
-            imported = true;
-            break;
-          } catch {
-            // Try the other legacy layout.
-          }
-        }
-        if (!imported) throw new Error("Legacy chat checkout could not be imported");
-      }
-      await hostGit(["update-ref", ref, input.headCommit], { cwd: mirrorPath });
-    }
+    const headCommit = input.headCommit
+      ? await this.restorableCommit({ ...input, mirrorPath, ref, headCommit: input.headCommit })
+      : baseCommit;
+    if (!input.headCommit) await hostGit(["update-ref", ref, baseCommit], { cwd: mirrorPath });
 
     await mkdir(location.root, { recursive: true });
     await hostGit(["clone", "--local", "--no-checkout", "--", mirrorPath, location.repository]);
-    await hostGit(["checkout", "-b", input.branchName, restoreCommit], { cwd: location.repository });
+    await hostGit(["-c", "advice.detachedHead=false", "checkout", "--detach", headCommit], {
+      cwd: location.repository,
+    });
     await hostGit(["config", "user.name", "Cloud Agent"], { cwd: location.repository });
     await hostGit(["config", "user.email", "cloud-agent@local"], { cwd: location.repository });
     await this.ensurePlatformGitExcludes(location.repository);
-    return location;
+
+    workspaceLogger.info(
+      { chatId: input.chatId, repositoryId: input.repositoryId, restored: Boolean(input.headCommit), durationMs: Date.now() - startedAt },
+      "Chat checkout prepared on a detached HEAD",
+    );
+    return { ...location, baseCommit, headCommit, created: true };
   }
 
-  /** The container is the only place agent-requested file work happens. */
-  async ensureSandbox(chatId: string, repositoryPath: string): Promise<string> {
+  /** True when the checkout carries work the platform has not committed yet. */
+  async hasTrackedChanges(repositoryPath: string): Promise<boolean> {
+    try {
+      await stat(join(repositoryPath, ".git"));
+    } catch {
+      return false;
+    }
     await this.ensurePlatformGitExcludes(repositoryPath);
-    return sandbox.ensureContainer(chatId, repositoryPath);
+    const status = await hostGit(["status", "--porcelain"], { cwd: repositoryPath });
+    return status.stdout.trim().length > 0;
+  }
+
+  /** Stops everything attached to a chat checkout and removes the directory. */
+  async discardChatCheckout(chatId: string): Promise<void> {
+    await processManager.stopAll(chatId);
+    await browserSessions.close(chatId);
+    await sandbox.removeContainer(chatId);
+    await rm(chatLocation(chatId).root, { recursive: true, force: true });
   }
 
   async checkpoint(input: {
@@ -304,27 +309,33 @@ export class WorkspaceManager {
     const location = chatLocation(input.chatId);
     const mirrorPath = repositoryMirrorPath(input.repositoryId);
     const mirrored = (await hostGit(["rev-parse", `${chatInternalRef(input.chatId)}^{commit}`], { cwd: mirrorPath })).stdout.trim();
-    if (mirrored !== input.expectedHeadCommit) throw new Error("Chat branch is not safely mirrored");
-    try {
-      await stat(join(location.repository, ".git"));
-      const status = await hostGit(["status", "--porcelain"], { cwd: location.repository });
-      if (status.stdout.trim()) throw new Error("Chat checkout has uncheckpointed changes");
-    } catch (error) {
-      if (error instanceof Error && error.message === "Chat checkout has uncheckpointed changes") throw error;
+    if (mirrored !== input.expectedHeadCommit) throw new Error("Chat checkpoint is not safely mirrored");
+    // The mirror already holds this chat's work, so a checkout Git cannot read is still disposable.
+    if (await this.hasTrackedChanges(location.repository).catch(() => false)) {
+      throw new Error("Chat checkout has uncheckpointed changes");
     }
-    await processManager.stopAll(input.chatId);
-    await browserSessions.close(input.chatId);
-    await sandbox.removeContainer(input.chatId);
-    await rm(location.root, { recursive: true, force: true });
+    await this.discardChatCheckout(input.chatId);
   }
 
   relativePath(repositoryPath: string, absolutePath: string): string {
     return relative(repositoryPath, absolutePath);
   }
 
-  private async ensureMirror(input: RemoteGitAccess & { repositoryId: string; repositoryUrl: string; baseBranch: string }) {
+  /** The checkpoint ref is the durable record, so it outranks a stored commit that fell behind. */
+  private async restorableCommit(input: { mirrorPath: string; ref: string; headCommit: string }): Promise<string> {
+    const fromRef = await hostGit(["rev-parse", `${input.ref}^{commit}`], { cwd: input.mirrorPath }).catch(() => null);
+    if (fromRef) return fromRef.stdout.trim();
+
+    const present = await hostGit(["cat-file", "-e", `${input.headCommit}^{commit}`], { cwd: input.mirrorPath })
+      .catch(() => null);
+    if (!present) throw new Error("Chat checkpoint is missing from the repository mirror");
+
+    await hostGit(["update-ref", input.ref, input.headCommit], { cwd: input.mirrorPath });
+    return input.headCommit;
+  }
+
+  private async ensureMirror(input: RemoteGitAccess & { repositoryId: string; repositoryUrl: string }) {
     const url = validateRepositoryUrl(input.repositoryUrl);
-    const baseBranch = validateBranchName(input.baseBranch);
     const mirrorPath = repositoryMirrorPath(input.repositoryId);
     await mkdir(dirname(mirrorPath), { recursive: true });
     try {
@@ -338,7 +349,27 @@ export class WorkspaceManager {
       ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
       { cwd: mirrorPath, timeoutMs: 120_000, env: input.gitEnvironment },
     );
-    return (await hostGit(["rev-parse", `refs/remotes/origin/${baseBranch}^{commit}`], { cwd: mirrorPath })).stdout.trim();
+    return mirrorPath;
+  }
+
+  private async remoteDefaultBranch(mirrorPath: string, gitEnvironment?: NodeJS.ProcessEnv): Promise<string> {
+    const listed = await hostGit(["ls-remote", "--symref", "origin", "HEAD"], {
+      cwd: mirrorPath,
+      timeoutMs: 60_000,
+      env: gitEnvironment,
+    });
+    const branch = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(listed.stdout)?.[1];
+    if (!branch) throw new Error("That repository has no default branch to start from");
+    return validateBranchName(branch);
+  }
+
+  private async branchCommit(mirrorPath: string, branch: string): Promise<string> {
+    try {
+      const resolved = await hostGit(["rev-parse", `refs/remotes/origin/${branch}^{commit}`], { cwd: mirrorPath });
+      return resolved.stdout.trim();
+    } catch {
+      throw new Error(`Branch ${branch} is not in this repository`);
+    }
   }
 
   private async ensurePlatformGitExcludes(repositoryPath: string): Promise<void> {

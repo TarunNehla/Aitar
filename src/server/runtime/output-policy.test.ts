@@ -53,9 +53,13 @@ describe("persisted tool arguments", () => {
     expect(safeToolArguments("unknown_tool", { secret: "value" })).toEqual({});
   });
 
-  it("keeps the pull request body out of the database", () => {
-    expect(safeToolArguments("create_pull_request", { title: "Add caching", body: "diff --git a b", draft: true }))
-      .toEqual({ title: "Add caching", draft: true });
+  it("keeps the pull request body and branch name out of the database", () => {
+    expect(safeToolArguments("create_pull_request", {
+      title: "Add caching",
+      branchName: "add-caching",
+      body: "diff --git a b",
+      draft: true,
+    })).toEqual({ title: "Add caching", draft: true });
   });
 });
 

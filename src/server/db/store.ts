@@ -96,7 +96,6 @@ export async function createSession(input: {
   repositoryId: string;
   title: string;
   baseBranch: string;
-  branchName: string;
   model?: string;
 }) {
   const [session] = await db
@@ -106,9 +105,38 @@ export async function createSession(input: {
       repositoryId: input.repositoryId,
       title: input.title,
       baseBranch: input.baseBranch,
-      branchName: input.branchName,
       defaultModel: input.model ?? config.OPENROUTER_MODEL,
     })
+    .returning();
+  return session;
+}
+
+export async function updateSessionBaseBranch(input: {
+  sessionId: string;
+  baseBranch: string;
+  baseCommit: string;
+  headCommit: string;
+}) {
+  const [session] = await db
+    .update(chatSessions)
+    .set({
+      baseBranch: input.baseBranch,
+      baseCommit: input.baseCommit,
+      headCommit: input.headCommit,
+      envStatus: "ready",
+      lastActiveAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(chatSessions.id, input.sessionId))
+    .returning();
+  return session;
+}
+
+export async function saveSessionPublishedBranch(sessionId: string, publishedBranch: string) {
+  const [session] = await db
+    .update(chatSessions)
+    .set({ publishedBranch, updatedAt: new Date() })
+    .where(eq(chatSessions.id, sessionId))
     .returning();
   return session;
 }

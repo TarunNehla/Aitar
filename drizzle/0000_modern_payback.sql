@@ -55,10 +55,10 @@ CREATE TABLE "chat_sessions" (
 	"repository_id" uuid NOT NULL,
 	"title" text DEFAULT 'New session' NOT NULL,
 	"base_branch" text DEFAULT 'main' NOT NULL,
-	"branch_name" text NOT NULL,
+	"published_branch" text,
 	"base_commit" text,
 	"head_commit" text,
-	"env_status" text DEFAULT 'preparing' NOT NULL,
+	"env_status" text DEFAULT 'idle' NOT NULL,
 	"last_active_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"provider" text DEFAULT 'openrouter' NOT NULL,
 	"default_model" text NOT NULL,
@@ -250,7 +250,7 @@ CREATE INDEX "artifacts_session_idx" ON "artifacts" USING btree ("session_id");-
 CREATE INDEX "auth_sessions_userId_idx" ON "auth_sessions" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "checkpoints_session_idx" ON "chat_checkpoints" USING btree ("session_id","created_at");--> statement-breakpoint
 CREATE INDEX "sessions_repository_idx" ON "chat_sessions" USING btree ("repository_id");--> statement-breakpoint
-CREATE UNIQUE INDEX "sessions_repository_branch_idx" ON "chat_sessions" USING btree ("repository_id","branch_name");--> statement-breakpoint
+CREATE UNIQUE INDEX "sessions_published_branch_idx" ON "chat_sessions" USING btree ("repository_id","published_branch") WHERE "chat_sessions"."published_branch" IS NOT NULL;--> statement-breakpoint
 CREATE UNIQUE INDEX "events_session_sequence_idx" ON "events" USING btree ("session_id","sequence");--> statement-breakpoint
 CREATE INDEX "events_run_idx" ON "events" USING btree ("run_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "github_installation_users_unique_idx" ON "github_installation_users" USING btree ("installation_id","user_id");--> statement-breakpoint

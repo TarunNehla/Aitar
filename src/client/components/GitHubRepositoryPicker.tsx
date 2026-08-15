@@ -17,7 +17,6 @@ export interface GitHubRepository {
   fullName: string;
   ownerLogin: string;
   private: boolean;
-  defaultBranch: string;
   cloneUrl: string;
 }
 
@@ -219,10 +218,6 @@ export function GitHubRepositoryPicker({
                 <span className={`github-visibility ${repository.private ? "private" : "public"}`}>
                   {repository.private ? "Private" : "Public"}
                 </span>
-                <code className="branch-label">
-                  <Icon name="git-branch" size={14} />
-                  {repository.defaultBranch}
-                </code>
               </button>
             </li>
           ))}

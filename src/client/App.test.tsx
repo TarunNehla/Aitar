@@ -34,9 +34,8 @@ vi.mock("./auth-client", async () => {
 });
 
 const repositories = [
-  { id: "repository-1", name: "Confidential project", repositoryUrl: "https://github.com/acme/secret", defaultBranch: "main" },
+  { id: "repository-1", name: "Confidential project", repositoryUrl: "https://github.com/acme/secret" },
 ];
-const agentBranch = "agent/78a2a00d-4f1e-4c2b-9a55-2b1f0c6d8e37";
 const deepseekModel = "deepseek/deepseek-v4-flash-0731";
 
 function newSession(title = "Private chat title") {
@@ -47,8 +46,6 @@ function newSession(title = "Private chat title") {
       repositoryId: "repository-1",
       defaultModel: deepseekModel,
       status: "active",
-      branchName: agentBranch,
-      baseBranch: "main",
       baseCommit: "3f9a17c4b2e58d06a1c7f3e9b0d2a4c6e8f01234",
       headCommit: "7b1d24e8a3c05f96b2d8e1a7c4f60b3d9e520187",
       envStatus: "ready",
@@ -74,6 +71,7 @@ function respond(path: string, options?: RequestInit) {
     return { session: sessions[0].session };
   }
   if (path.endsWith("/messages")) return { message: { id: "message-sent" } };
+  if (path.endsWith("/chats")) return { session: { id: "created-session" } };
   if (path.startsWith("/api/sessions/")) {
     return { ...sessions[0], messages: sessionMessages, runs: [], pullRequests: sessionPullRequests };
   }
@@ -314,7 +312,7 @@ describe("tool rendering", () => {
     expect(document.querySelectorAll(".tool-result")).toHaveLength(1);
   });
 
-  it("shows the pull request as a clickable card with its branches and state", async () => {
+  it("shows the pull request as a clickable card with its number, title, and state", async () => {
     sessionMessages = [
       toolMessage("call-1", "create_pull_request", {
         number: 42,
@@ -322,8 +320,6 @@ describe("tool rendering", () => {
         state: "open",
         draft: false,
         title: "Add caching",
-        headBranch: "agent/session-1",
-        baseBranch: "main",
       }),
     ];
     sessionPullRequests = [
@@ -333,8 +329,6 @@ describe("tool rendering", () => {
         state: "open",
         draft: false,
         title: "Add caching",
-        headBranch: "agent/session-1",
-        baseBranch: "main",
       },
     ];
     await openConsole();
@@ -344,8 +338,31 @@ describe("tool rendering", () => {
     expect(card.href).toBe("https://github.com/acme/service/pull/42");
     expect(screen.getByText("#42")).toBeDefined();
     expect(screen.getByText("Open")).toBeDefined();
-    expect(card.textContent).toContain("agent/session-1");
-    expect(card.textContent).toContain("main");
+  });
+
+  it("keeps the published branch off the pull request card", async () => {
+    const publishedBranch = "agent/add-caching-78a2a00d";
+    sessionMessages = [
+      toolMessage("call-1", "create_pull_request", {
+        number: 42,
+        url: "https://github.com/acme/service/pull/42",
+        state: "open",
+        draft: false,
+        title: "Add caching",
+        headBranch: publishedBranch,
+        baseBranch: "main",
+      }),
+    ];
+    sessionPullRequests = [
+      { number: 42, url: "https://github.com/acme/service/pull/42", state: "open", draft: false, title: "Add caching" },
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText("Add caching")).toBeDefined());
+    const card = document.querySelector("a.pull-request-card") as HTMLAnchorElement;
+    expect(card.textContent).not.toContain(publishedBranch);
+    expect(card.textContent).not.toContain("agent/");
+    expect(document.querySelector(".pull-request-branches")).toBeNull();
   });
 
   it("renders one concise line per browser action", async () => {
@@ -630,7 +647,7 @@ describe("conversation header", () => {
 
     await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
     const text = document.body.textContent ?? "";
-    expect(text).not.toContain(agentBranch);
+    expect(text).not.toContain("agent/");
     expect(text).not.toContain("3f9a17c");
     expect(text).not.toContain("7b1d24e");
     expect(text).not.toContain(deepseekModel);
@@ -712,7 +729,6 @@ describe("sidebar chat cards", () => {
 
     const card = sessionCard();
     expect(card.querySelector(".session-name")?.textContent).toBe("Private chat title");
-    expect(card.textContent).not.toContain(agentBranch);
     expect(card.textContent).not.toContain("agent/");
     expect(card.textContent).not.toContain("3f9a17c");
     expect(card.textContent).not.toContain(deepseekModel);
@@ -730,26 +746,14 @@ describe("sidebar chat cards", () => {
 });
 
 describe("composer metadata", () => {
-  it("puts a shortened branch inside the composer box, never in the sidebar", async () => {
+  it("shows no branch chip and no copy control", async () => {
     await openConsole();
 
-    await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
-    const branch = document.querySelector(".composer-branch") as HTMLElement;
-    const textarea = document.querySelector(".composer textarea") as HTMLTextAreaElement;
-
-    expect(branch.textContent).toBe("agent/78a2a00d…");
-    expect(branch.getAttribute("title")).toBe(agentBranch);
-    expect(document.querySelector(".composer-box")?.contains(branch)).toBe(true);
-    expect(textarea.compareDocumentPosition(branch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(document.querySelector(".sidebar")?.textContent).not.toContain("agent/");
-  });
-
-  it("carries no copy control beside the branch", async () => {
-    await openConsole();
-
-    await waitFor(() => expect(document.querySelector(".composer-branch")).not.toBeNull());
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    expect(document.querySelector(".composer-branch")).toBeNull();
     expect(document.querySelector(".copy-button")).toBeNull();
     expect(screen.queryByLabelText(/copy/i)).toBeNull();
+    expect(document.querySelector(".composer")?.textContent).not.toContain("agent/");
   });
 
   it("puts the model dropdown in the composer box with no visible label", async () => {
@@ -794,6 +798,12 @@ describe("composer metadata", () => {
     expect(document.querySelector(".composer-status")).toBeNull();
 
     cleanup();
+    sessions = [{ ...newSession(), session: { ...newSession().session, envStatus: "idle" } }];
+    await openConsole();
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    expect(document.querySelector(".composer-status")).toBeNull();
+
+    cleanup();
     sessions = [{ ...newSession(), session: { ...newSession().session, envStatus: "preparing" } }];
     await openConsole();
 
@@ -807,6 +817,46 @@ describe("composer metadata", () => {
     expect(rule).toContain("flex-wrap: wrap");
     expect(rule).toContain("min-width: 0");
     expect(stylesheet).not.toContain(".conversation-header");
+  });
+});
+
+describe("branch information is gone from the interface", () => {
+  it("renders no branch chip, label, or icon anywhere", async () => {
+    sessionPullRequests = [
+      { number: 42, url: "https://github.com/acme/service/pull/42", state: "open", draft: false, title: "Add caching" },
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".composer")).not.toBeNull());
+    for (const selector of [".composer-branch", ".pull-request-branches", ".branch-label", ".lucide-git-branch"]) {
+      expect(document.querySelector(selector), selector).toBeNull();
+    }
+    const text = document.body.textContent ?? "";
+    expect(text).not.toMatch(/branch/i);
+    expect(text).not.toContain("refs/");
+  });
+
+  it("keeps branch names, refs, and whole chat ids out of the console source", async () => {
+    const app = readFileSync(resolve(process.cwd(), "src/client/App.tsx"), "utf8");
+    const styles = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
+
+    for (const term of ["branchName", "headBranch", "baseBranch", "defaultBranch", "branch_published", "git-branch"]) {
+      expect(app, term).not.toContain(term);
+    }
+    for (const rule of [".composer-branch", ".pull-request-branches", ".branch-label"]) {
+      expect(styles, rule).not.toContain(rule);
+    }
+  });
+
+  it("asks the server for a new chat without naming a branch", async () => {
+    await openConsole();
+    fireEvent.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() =>
+      expect(apiMock.mock.calls.some(([path]) => String(path).endsWith("/chats"))).toBe(true),
+    );
+    const [, options] = apiMock.mock.calls.find(([path]) => String(path).endsWith("/chats")) as [string, RequestInit];
+    expect(Object.keys(JSON.parse(String(options.body)))).not.toContain("baseBranch");
   });
 });
 

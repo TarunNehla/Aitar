@@ -7,13 +7,9 @@ import { schema } from "../src/server/db/schema.js";
 import { runProcess } from "../src/server/runtime/process.js";
 import { verifyResetTarget } from "../src/server/runtime/reset-safety.js";
 
-/** Tables this application has owned at some point. Nothing else is ever touched. */
-const legacyTables = ["approval_requests", "workspaces", "sessions"];
-
 const runtimeDirectories = [
   { name: "chats", description: "chat checkouts" },
   { name: "repos", description: "repository mirrors and checkpoint refs" },
-  { name: "workspaces", description: "old workspace directories" },
   { name: "credentials", description: "askpass helper regenerated on boot" },
 ];
 
@@ -49,7 +45,7 @@ function databaseScope() {
     host: url.hostname,
     database: url.pathname.replace(/^\//, "") || "postgres",
     schema: "public",
-    tables: [...new Set([...Object.values(schema).map((table) => getTableName(table)), ...legacyTables])].sort(),
+    tables: [...new Set(Object.values(schema).map((table) => getTableName(table)))].sort(),
   };
 }
 

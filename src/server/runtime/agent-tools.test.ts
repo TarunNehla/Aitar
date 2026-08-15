@@ -179,6 +179,7 @@ describe("agent tool schemas", () => {
       "start_process",
       "process_logs",
       "stop_process",
+      "switch_base_branch",
       "create_pull_request",
       "browser_navigate",
       "browser_snapshot",
@@ -230,7 +231,11 @@ describe("agent tool schemas", () => {
     expect(shape("start_process")).toEqual({ properties: ["command", "name"], required: ["command"] });
     expect(shape("process_logs")).toEqual({ properties: ["cursor", "limit", "processId"], required: ["processId"] });
     expect(shape("stop_process")).toEqual({ properties: ["force", "processId"], required: ["processId"] });
-    expect(shape("create_pull_request")).toEqual({ properties: ["body", "draft", "title"], required: ["title"] });
+    expect(shape("switch_base_branch")).toEqual({ properties: ["branch"], required: ["branch"] });
+    expect(shape("create_pull_request")).toEqual({
+      properties: ["body", "branchName", "draft", "title"],
+      required: ["branchName", "title"],
+    });
 
     const edits = schemas.edit.properties.edits;
     expect(edits.type).toBe("array");

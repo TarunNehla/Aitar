@@ -25,7 +25,6 @@ export function RepositorySetup({
 }) {
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [name, setName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("main");
   const [model, setModel] = useState(defaultModel ?? fallbackModel);
   const [stage, setStage] = useState<Stage | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -39,7 +38,6 @@ export function RepositorySetup({
     if (busy) return;
 
     const url = repositoryUrl.trim();
-    const branch = baseBranch.trim() || "main";
     const invalid = repositoryUrlError(url);
     if (invalid) {
       setLocalError(invalid);
@@ -55,7 +53,6 @@ export function RepositorySetup({
           body: JSON.stringify({
             name: name.trim() || repositoryNameFromUrl(url),
             repositoryUrl: url,
-            defaultBranch: branch,
           }),
         });
         repositoryIdRef.current = created.repository.id;
@@ -66,7 +63,7 @@ export function RepositorySetup({
         `/api/repositories/${repositoryIdRef.current}/chats`,
         {
           method: "POST",
-          body: JSON.stringify({ title: "New session", model: model.trim(), baseBranch: branch }),
+          body: JSON.stringify({ title: "New session", model: model.trim() }),
         },
       );
 
@@ -74,7 +71,7 @@ export function RepositorySetup({
       await onCreated(session.session.id);
     } catch (reason) {
       setStage(null);
-      setLocalError(describeSetupError(reason, branch));
+      setLocalError(describeSetupError(reason));
     }
   }
 
@@ -116,28 +113,16 @@ export function RepositorySetup({
               required
             />
           </label>
-          <div className="field-row">
-            <label>
-              <span>Base branch</span>
-              <input
-                name="baseBranch"
-                value={baseBranch}
-                onChange={(event) => setBaseBranch(event.target.value)}
-                disabled={busy}
-                required
-              />
-            </label>
-            <label>
-              <span>Model</span>
-              <input
-                name="model"
-                value={model}
-                onChange={(event) => setModel(event.target.value)}
-                disabled={busy}
-                required
-              />
-            </label>
-          </div>
+          <label>
+            <span>Model</span>
+            <input
+              name="model"
+              value={model}
+              onChange={(event) => setModel(event.target.value)}
+              disabled={busy}
+              required
+            />
+          </label>
         </div>
       </details>
 

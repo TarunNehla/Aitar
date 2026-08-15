@@ -18,10 +18,11 @@ const repository = {
 };
 
 const session = {
-  id: "session-1",
+  id: "78a2a00d-b791-4ef5-92b9-b81d39d08ddd",
   repositoryId: repository.id,
+  title: "New session",
   baseBranch: "main",
-  branchName: "agent/session-1",
+  publishedBranch: null as string | null,
   baseCommit: "a".repeat(40),
   headCommit: "a".repeat(40),
 };
@@ -29,12 +30,17 @@ const session = {
 let relation: { session: typeof session; repository: typeof repository } | undefined;
 let installationLinked = true;
 const savedPullRequests: Array<Record<string, unknown>> = [];
+const savedPublishedBranches: string[] = [];
 
 vi.mock("../db/store.js", () => ({
   getSession: async () => relation,
   savePullRequest: async (input: Record<string, unknown>) => {
     savedPullRequests.push(input);
     return input;
+  },
+  saveSessionPublishedBranch: async (_sessionId: string, branch: string) => {
+    savedPublishedBranches.push(branch);
+    return undefined;
   },
   saveCheckpoint: async () => undefined,
   updateSessionHead: async () => undefined,
@@ -58,7 +64,7 @@ vi.mock("../db/client.js", () => ({
 
 const checkpoint = vi.fn(async () => ({
   checkpointCommit: "b".repeat(40),
-  internalRef: "refs/cloud-agents/chats/session-1",
+  internalRef: `refs/cloud-agents/chats/${session.id}`,
   createdCommit: true,
   changedFiles: [{ status: "A", path: "src/new.ts" }],
 }));
@@ -88,13 +94,15 @@ vi.mock("../logger.js", async () => {
 
 const { createPullRequestForChat } = await import("./pull-request.js");
 
+const readableBranch = "agent/add-caching-78a2a00d";
+
 const created = {
   number: 42,
   url: "https://github.com/acme/service/pull/42",
   state: "open",
   draft: false,
   title: "Add caching",
-  headBranch: "agent/session-1",
+  headBranch: readableBranch,
   baseBranch: "main",
 };
 
@@ -113,12 +121,13 @@ const writer = {
   drain: vi.fn(async () => undefined),
 };
 
-function request(clientOverride: unknown) {
+function request(clientOverride: unknown, title = "Add caching", branchName = "add-caching") {
   return createPullRequestForChat({
     sessionId: session.id,
     runId: "run-1",
     repositoryPath: "/tmp/cloud-agents-tests/repository",
-    title: "Add caching",
+    title,
+    branchName,
     body: "Adds a cache",
     writer: writer as never,
     client: clientOverride as never,
@@ -129,6 +138,7 @@ beforeEach(() => {
   relation = { session: { ...session }, repository: { ...repository } };
   installationLinked = true;
   savedPullRequests.length = 0;
+  savedPublishedBranches.length = 0;
   logged.length = 0;
   runChecked.mockClear();
   writer.emit.mockClear();
@@ -141,13 +151,13 @@ describe("create_pull_request", () => {
     const outcome = await request(github);
 
     expect(outcome).toMatchObject({ number: 42, url: created.url, state: "open", draft: false, reused: false });
-    expect(outcome.headBranch).toBe("agent/session-1");
+    expect(outcome.headBranch).toBe(readableBranch);
     expect(outcome.baseBranch).toBe("main");
     expect(checkpoint).toHaveBeenCalledTimes(1);
 
     const push = runChecked.mock.calls.find(([, args]: any) => args.includes("push")) as any;
     expect(push[0]).toBe("git");
-    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/agent/session-1`);
+    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/${readableBranch}`);
     expect(push[1]).toContain("https://github.com/acme/service.git");
 
     expect((github as any).createInstallationToken.mock.calls[0][0]).toMatchObject({
@@ -159,7 +169,72 @@ describe("create_pull_request", () => {
     const events = writer.emit.mock.calls.map(([type]) => type);
     expect(events).toContain("branch_published");
     expect(events).toContain("pull_request_created");
-    expect(savedPullRequests[0]).toMatchObject({ number: 42, headCommit: "b".repeat(40), sessionId: "session-1" });
+    expect(JSON.stringify(writer.emit.mock.calls)).not.toContain(readableBranch);
+    expect(savedPullRequests[0]).toMatchObject({ number: 42, headCommit: "b".repeat(40), sessionId: session.id });
+    expect(savedPublishedBranches).toEqual([readableBranch]);
+  });
+
+  it("names the remote branch after the name the model gave it, plus a short chat suffix", async () => {
+    await request(client(), "Fix the login screen", "fix-login-screen");
+
+    const push = runChecked.mock.calls.find(([, args]: any) => args.includes("push")) as any;
+    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/agent/fix-login-screen-78a2a00d`);
+    expect(JSON.stringify(push[1])).not.toContain(session.id);
+  });
+
+  /** A chat that opens with small talk still publishes a branch that reads like its diff. */
+  it("takes no part of the branch name from the conversation", async () => {
+    relation = { session: { ...session, title: "Hi , How are you" }, repository: { ...repository } };
+
+    await request(client(), "fix: login screen flicker", "login-screen-flicker");
+
+    const push = runChecked.mock.calls.find(([, args]: any) => args.includes("push")) as any;
+    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/agent/login-screen-flicker-78a2a00d`);
+    expect(JSON.stringify(push[1])).not.toContain("how-are-you");
+  });
+
+  it("places the name the model gave it instead of trusting it", async () => {
+    await request(client(), "Fix the login screen", "refs/heads/main");
+
+    const push = runChecked.mock.calls.find(([, args]: any) => args.includes("push")) as any;
+    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/agent/main-78a2a00d`);
+    expect(savedPublishedBranches).toEqual(["agent/main-78a2a00d"]);
+  });
+
+  it("names the branch without a second model call", async () => {
+    const github = client();
+    await request(github);
+
+    expect(Object.keys(github as object)).not.toContain("complete");
+    expect(runChecked.mock.calls.every(([command]: any) => command === "git")).toBe(true);
+  });
+
+  it("creates no second commit when the checkpoint already exists", async () => {
+    checkpoint.mockResolvedValueOnce({
+      checkpointCommit: "b".repeat(40),
+      internalRef: `refs/cloud-agents/chats/${session.id}`,
+      createdCommit: false,
+      changedFiles: [],
+    });
+    relation = { session: { ...session, headCommit: "b".repeat(40) }, repository: { ...repository } };
+
+    const outcome = await request(client());
+
+    expect(outcome.headCommit).toBe("b".repeat(40));
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+    expect(runChecked.mock.calls.filter(([, args]: any) => args.includes("commit"))).toHaveLength(0);
+    const events = writer.emit.mock.calls.map(([type]) => type);
+    expect(events).not.toContain("checkpoint_saved");
+  });
+
+  it("reuses the branch it already published to", async () => {
+    relation = { session: { ...session, publishedBranch: readableBranch }, repository: { ...repository } };
+
+    await request(client({ findPullRequest: vi.fn(async () => created) }), "Something else entirely now", "something-else");
+
+    const push = runChecked.mock.calls.find(([, args]: any) => args.includes("push")) as any;
+    expect(push[1]).toContain(`${"b".repeat(40)}:refs/heads/${readableBranch}`);
+    expect(savedPublishedBranches).toEqual([]);
   });
 
   it("reuses the existing pull request when called again", async () => {
@@ -188,14 +263,14 @@ describe("create_pull_request", () => {
     expect(outcome.number).toBe(42);
   });
 
-  it("never lets the model choose the repository or head branch", async () => {
+  it("never lets the model choose the repository or the branch it merges into", async () => {
     const github = client();
     await request(github);
     const [[call]] = (github as any).createPullRequest.mock.calls;
     expect(call).toMatchObject({
       owner: "acme",
       repository: "service",
-      headBranch: "agent/session-1",
+      headBranch: readableBranch,
       baseBranch: "main",
     });
   });
@@ -234,7 +309,7 @@ describe("create_pull_request", () => {
   it("refuses to publish when the chat has produced no commit", async () => {
     checkpoint.mockResolvedValueOnce({
       checkpointCommit: session.baseCommit,
-      internalRef: "refs/cloud-agents/chats/session-1",
+      internalRef: `refs/cloud-agents/chats/${session.id}`,
       createdCommit: false,
       changedFiles: [],
     });

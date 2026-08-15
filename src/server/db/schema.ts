@@ -96,10 +96,11 @@ export const chatSessions = pgTable(
     repositoryId: uuid("repository_id").notNull().references(() => repositories.id, { onDelete: "cascade" }),
     title: text("title").notNull().default("New session"),
     baseBranch: text("base_branch").notNull().default("main"),
-    branchName: text("branch_name").notNull(),
+    /** Set the first time a pull request publishes this chat, never before. */
+    publishedBranch: text("published_branch"),
     baseCommit: text("base_commit"),
     headCommit: text("head_commit"),
-    envStatus: text("env_status").notNull().default("preparing"),
+    envStatus: text("env_status").notNull().default("idle"),
     lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
     provider: text("provider").notNull().default("openrouter"),
     defaultModel: text("default_model").notNull(),
@@ -112,7 +113,9 @@ export const chatSessions = pgTable(
   },
   (table) => [
     index("sessions_repository_idx").on(table.repositoryId),
-    uniqueIndex("sessions_repository_branch_idx").on(table.repositoryId, table.branchName),
+    uniqueIndex("sessions_published_branch_idx")
+      .on(table.repositoryId, table.publishedBranch)
+      .where(sql`${table.publishedBranch} IS NOT NULL`),
   ],
 );
 

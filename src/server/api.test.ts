@@ -28,10 +28,12 @@ const ownedRepository = {
 const ownedSession = {
   id: "22222222-2222-4222-8222-222222222222",
   repositoryId: ownedRepository.id,
+  title: "Owned chat",
   baseBranch: "main",
-  branchName: "agent/22222222-2222-4222-8222-222222222222",
+  publishedBranch: null,
   baseCommit: "a".repeat(40),
   headCommit: "b".repeat(40),
+  envStatus: "ready",
   settings: {},
 };
 
@@ -54,6 +56,34 @@ vi.mock("./runtime/agent-runner.js", () => ({
   activeRuns: { has: () => false, steer: () => false, cancel: () => false },
 }));
 
+const ensureChatCheckout = vi.fn(async () => ({
+  root: "/tmp/cloud-agents-tests/chats/chat",
+  repository: "/tmp/cloud-agents-tests/chats/chat/repository",
+  baseCommit: ownedSession.baseCommit,
+  headCommit: ownedSession.headCommit,
+  created: false,
+}));
+const prepareRepository = vi.fn(async () => ({
+  mirrorPath: "/tmp/cloud-agents-tests/repos/repository.git",
+  defaultBranch: "main",
+  baseCommit: "a".repeat(40),
+}));
+const ensureContainer = vi.fn(async () => "cloud-agent-chat");
+
+vi.mock("./runtime/workspace-manager.js", async () => {
+  const actual = await vi.importActual<typeof import("./runtime/workspace-manager.js")>(
+    "./runtime/workspace-manager.js",
+  );
+  return { ...actual, workspaceManager: { ensureChatCheckout, prepareRepository } };
+});
+
+vi.mock("./runtime/sandbox.js", async () => {
+  const actual = await vi.importActual<typeof import("./runtime/sandbox.js")>("./runtime/sandbox.js");
+  return { ...actual, sandbox: { ensureContainer } };
+});
+
+const createdSessions: Array<Record<string, unknown>> = [];
+
 vi.mock("./db/store.js", () => ({
   listRepositories: async (ownerUserId: string) =>
     ownerUserId === owner.id ? [ownedRepository] : [],
@@ -75,7 +105,10 @@ vi.mock("./db/store.js", () => ({
   getActiveRunForSession: async () => undefined,
   listEvents: async () => [],
   createRepository: async () => ownedRepository,
-  createSession: async () => ownedSession,
+  createSession: async (input: Record<string, unknown>) => {
+    createdSessions.push(input);
+    return { ...ownedSession, ...input };
+  },
   createUserMessageAndRun: async () => ({ message: { id: "message" }, run: ownedRun }),
   createQueuedUserMessage: async () => ({ id: "message" }),
   deleteQueuedMessage: async () => undefined,
@@ -121,6 +154,9 @@ afterAll(() => {
 
 beforeEach(() => {
   currentUser = null;
+  createdSessions.length = 0;
+  ensureChatCheckout.mockClear();
+  ensureContainer.mockClear();
 });
 
 async function call(path: string, options?: RequestInit) {
@@ -161,6 +197,81 @@ describe("API authentication", () => {
       body: JSON.stringify({ name: "x", repositoryUrl: "https://github.com/owner/owned" }),
     });
     expect(response.status).toBe(401);
+  });
+});
+
+describe("chat creation", () => {
+  async function createChat() {
+    currentUser = owner;
+    return call(`/api/repositories/${ownedRepository.id}/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "New session" }),
+    });
+  }
+
+  it("saves the chat with the repository's default branch and nothing else", async () => {
+    const response = await createChat();
+
+    expect(response.status).toBe(201);
+    expect(createdSessions).toHaveLength(1);
+    expect(createdSessions[0]).toMatchObject({ repositoryId: ownedRepository.id, baseBranch: "main" });
+    expect(Object.keys(createdSessions[0])).not.toContain("branchName");
+    expect(Object.keys(createdSessions[0])).not.toContain("publishedBranch");
+  });
+
+  it("prepares no checkout and starts no container for a new chat", async () => {
+    await createChat();
+
+    expect(ensureChatCheckout).not.toHaveBeenCalled();
+    expect(ensureContainer).not.toHaveBeenCalled();
+  });
+
+  it("ignores a base branch the browser tries to choose", async () => {
+    currentUser = owner;
+    const response = await call(`/api/repositories/${ownedRepository.id}/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "New session", baseBranch: "release" }),
+    });
+
+    expect(response.status).toBe(201);
+    expect(createdSessions[0]).toMatchObject({ baseBranch: "main" });
+  });
+});
+
+describe("branch information stays server side", () => {
+  it("sends no branch on a created chat", async () => {
+    currentUser = owner;
+    const response = await call(`/api/repositories/${ownedRepository.id}/chats`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "New session" }),
+    });
+    const body = await response.json();
+
+    expect(body.session.baseBranch).toBeUndefined();
+    expect(body.session.publishedBranch).toBeUndefined();
+  });
+
+  it("sends no branch on chats, repositories, or pull requests", async () => {
+    currentUser = owner;
+    const [sessions, detail, repositories] = await Promise.all([
+      (await call("/api/sessions")).json(),
+      (await call(`/api/sessions/${ownedSession.id}`)).json(),
+      (await call("/api/repositories")).json(),
+    ]);
+
+    expect(sessions.sessions[0].session.baseBranch).toBeUndefined();
+    expect(sessions.sessions[0].repository.defaultBranch).toBeUndefined();
+    expect(detail.session.baseBranch).toBeUndefined();
+    expect(detail.session.publishedBranch).toBeUndefined();
+    expect(detail.repository.defaultBranch).toBeUndefined();
+    expect(repositories.repositories[0].defaultBranch).toBeUndefined();
+    for (const payload of [sessions, detail, repositories]) {
+      expect(JSON.stringify(payload)).not.toContain("agent/");
+      expect(JSON.stringify(payload)).not.toContain("refs/");
+    }
   });
 });
 

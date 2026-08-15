@@ -115,7 +115,7 @@ describe("sandbox isolation", () => {
     runProcess.mockResolvedValueOnce({ ...result, exitCode: 1 });
 
     await withInstallationCredentials(token, async () => {
-      await workspaceManager.ensureSandbox("chat-2", "/tmp/cloud-agents-tests/repository");
+      await sandbox.ensureContainer("chat-2", "/tmp/cloud-agents-tests/repository");
     });
 
     for (const [, commandArguments, options] of dockerCalls()) {
@@ -129,7 +129,7 @@ describe("sandbox isolation", () => {
       await workspaceManager.prepareRepository({
         repositoryId: "repository-1",
         repositoryUrl: "https://github.com/acme/service.git",
-        baseBranch: "main",
+        defaultBranch: "main",
         gitEnvironment,
       });
     });
