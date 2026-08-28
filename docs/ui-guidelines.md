@@ -87,12 +87,12 @@ literal hex or a one-off pixel value in an auth or onboarding rule is a bug.
 ## Authentication structure
 
 Every authentication view is built from the same pieces in
-`src/client/components/auth/`: `AuthShell`, `AuthCard`, `AuthHeader`, `AuthField`,
+`src/client/auth/components/`: `AuthShell`, `AuthCard`, `AuthHeader`, `AuthField`,
 `PasswordField`, `SocialSignInButtons`, and `AuthStatus`. `AuthScreen` composes them and is
 the only component that decides which view is on screen.
 
-View state lives in `src/client/auth-flow.ts` — mode, pending operation, field errors,
-general error, and success state — and copy lives in `src/client/auth-copy.ts`. Sign-in,
+View state lives in `src/client/auth/auth-flow.ts` — mode, pending operation, field errors,
+general error, and success state — and copy lives in `src/client/auth/auth-copy.ts`. Sign-in,
 sign-up, verification, and reset-link URL handling are resolved once, by `readAuthEntry`.
 Do not scatter that logic back into unrelated components, and do not add a one-off layout
 for a new step.
