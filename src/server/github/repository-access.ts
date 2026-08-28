@@ -4,7 +4,7 @@ import { getGithubInstallationForUser } from "../db/github-store.js";
 import type { RepositoryRow } from "../db/store.js";
 import { githubInstallations } from "../db/schema.js";
 import { logger } from "../logger.js";
-import { baseGitEnvironment, withInstallationCredentials } from "../runtime/git-credentials.js";
+import { baseGitEnvironment, withInstallationCredentials } from "../runtime/workspace/git-credentials.js";
 import { GitHubInstallationUnavailableError, githubApp, type GitHubAppClient } from "./app.js";
 
 const accessLogger = logger.child({ component: "github-repository-access" });

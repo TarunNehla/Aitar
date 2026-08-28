@@ -56,8 +56,8 @@ import {
   type SessionRelation,
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
-import { activeRuns } from "./runtime/agent-runner.js";
-import { validateRepositoryUrl, workspaceManager } from "./runtime/workspace-manager.js";
+import { activeRuns } from "./runtime/agent/agent-runner.js";
+import { validateRepositoryUrl, workspaceManager } from "./runtime/workspace/workspace-manager.js";
 
 const apiLogger = logger.child({ component: "api" });
 

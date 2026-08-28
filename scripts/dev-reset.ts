@@ -5,7 +5,7 @@ import { config } from "../src/server/config.js";
 import { closeDatabase, sql } from "../src/server/db/client.js";
 import { schema } from "../src/server/db/schema.js";
 import { runProcess } from "../src/server/runtime/process.js";
-import { verifyResetTarget } from "../src/server/runtime/reset-safety.js";
+import { verifyResetTarget } from "../src/server/runtime/workspace/reset-safety.js";
 
 const runtimeDirectories = [
   { name: "chats", description: "chat checkouts" },

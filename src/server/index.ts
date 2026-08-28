@@ -4,13 +4,13 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { createApi } from "./api.js";
 import { closeDatabase } from "./db/client.js";
-import { agentWorker } from "./runtime/agent-runner.js";
+import { agentWorker } from "./runtime/agent/agent-runner.js";
 import { config } from "./config.js";
 import { errorForLog, logger } from "./logger.js";
-import { ensureAskpassHelper } from "./runtime/git-credentials.js";
-import { environmentReaper } from "./runtime/environment-reaper.js";
-import { browserSidecar } from "./runtime/browser-sidecar.js";
-import { browserSessions } from "./runtime/browser-session.js";
+import { ensureAskpassHelper } from "./runtime/workspace/git-credentials.js";
+import { environmentReaper } from "./runtime/workspace/environment-reaper.js";
+import { browserSidecar } from "./runtime/browser/browser-sidecar.js";
+import { browserSessions } from "./runtime/browser/browser-session.js";
 
 const app = createApi();
 const currentDirectory = dirname(fileURLToPath(import.meta.url));

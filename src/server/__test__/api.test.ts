@@ -52,7 +52,7 @@ vi.mock("../auth/auth.js", () => ({
   },
 }));
 
-vi.mock("../runtime/agent-runner.js", () => ({
+vi.mock("../runtime/agent/agent-runner.js", () => ({
   activeRuns: { has: () => false, steer: () => false, cancel: () => false },
 }));
 
@@ -70,15 +70,15 @@ const prepareRepository = vi.fn(async () => ({
 }));
 const ensureContainer = vi.fn(async () => "cloud-agent-chat");
 
-vi.mock("../runtime/workspace-manager.js", async () => {
-  const actual = await vi.importActual<typeof import("../runtime/workspace-manager.js")>(
-    "../runtime/workspace-manager.js",
+vi.mock("../runtime/workspace/workspace-manager.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/workspace/workspace-manager.js")>(
+    "../runtime/workspace/workspace-manager.js",
   );
   return { ...actual, workspaceManager: { ensureChatCheckout, prepareRepository } };
 });
 
-vi.mock("../runtime/sandbox.js", async () => {
-  const actual = await vi.importActual<typeof import("../runtime/sandbox.js")>("../runtime/sandbox.js");
+vi.mock("../runtime/sandbox/sandbox.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/sandbox/sandbox.js")>("../runtime/sandbox/sandbox.js");
   return { ...actual, sandbox: { ensureContainer } };
 });
 
