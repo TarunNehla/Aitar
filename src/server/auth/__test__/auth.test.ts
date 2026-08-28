@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { auth, credentialOptions } from "./auth.js";
-import { config, senderAddress } from "../config.js";
+import { auth, credentialOptions } from "../auth.js";
+import { config, senderAddress } from "../../config.js";
 
 function providerOptions(provider: "google" | "github"): Record<string, unknown> {
   const configured = auth.options.socialProviders?.[provider];

@@ -1,8 +1,8 @@
 import { getTableColumns } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GitHubAppClient, type GitHubRequestInput } from "./app.js";
-import { githubInstallationUsers, githubInstallations, repositories } from "../db/schema.js";
-import type { RepositoryRow } from "../db/store.js";
+import { GitHubAppClient, type GitHubRequestInput } from "../app.js";
+import { githubInstallationUsers, githubInstallations, repositories } from "../../db/schema.js";
+import type { RepositoryRow } from "../../db/store.js";
 
 const installationToken = "ghs_repositoryaccesstesttoken00000000";
 
@@ -18,7 +18,7 @@ let installationRow = {
 
 let membershipGranted = true;
 
-vi.mock("../db/client.js", () => ({
+vi.mock("../../db/client.js", () => ({
   db: {
     select: () => ({
       from: () => ({
@@ -29,11 +29,11 @@ vi.mock("../db/client.js", () => ({
   sql: {},
 }));
 
-vi.mock("../db/github-store.js", () => ({
+vi.mock("../../db/github-store.js", () => ({
   getGithubInstallationForUser: async () => (membershipGranted ? installationRow : undefined),
 }));
 
-const { withRepositoryGitAccess, readOnlyContentsPermissions } = await import("./repository-access.js");
+const { withRepositoryGitAccess, readOnlyContentsPermissions } = await import("../repository-access.js");
 
 const privateRepository: RepositoryRow = {
   id: "repository-uuid",

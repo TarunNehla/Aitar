@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { GitHubAppClient, GitHubInstallationUnavailableError, type GitHubRequestInput } from "./app.js";
-import { createInstallationState, verifyInstallationState } from "./installation-state.js";
+import { GitHubAppClient, GitHubInstallationUnavailableError, type GitHubRequestInput } from "../app.js";
+import { createInstallationState, verifyInstallationState } from "../installation-state.js";
 
 const installationToken = "ghs_mintedinstallationtoken0000000000000";
 

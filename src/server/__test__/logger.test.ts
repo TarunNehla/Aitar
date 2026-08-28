@@ -1,7 +1,7 @@
 import { Writable } from "node:stream";
 import pino from "pino";
 import { describe, expect, it } from "vitest";
-import { createLoggerOptions, errorForLog, redactSecrets } from "./logger.js";
+import { createLoggerOptions, errorForLog, redactSecrets } from "../logger.js";
 
 function capture(log: (logger: pino.Logger) => void): { raw: string; entry: Record<string, unknown> } {
   const lines: string[] = [];

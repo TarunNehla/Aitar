@@ -45,14 +45,14 @@ function accessFor<T>(row: T, ownerUserId: string | null, userId: string) {
   return { status: "ok", value: row } as const;
 }
 
-vi.mock("./auth/auth.js", () => ({
+vi.mock("../auth/auth.js", () => ({
   auth: {
     api: { getSession: async () => (currentUser ? { user: currentUser, session: { id: "session" } } : null) },
     handler: async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
   },
 }));
 
-vi.mock("./runtime/agent-runner.js", () => ({
+vi.mock("../runtime/agent-runner.js", () => ({
   activeRuns: { has: () => false, steer: () => false, cancel: () => false },
 }));
 
@@ -70,21 +70,21 @@ const prepareRepository = vi.fn(async () => ({
 }));
 const ensureContainer = vi.fn(async () => "cloud-agent-chat");
 
-vi.mock("./runtime/workspace-manager.js", async () => {
-  const actual = await vi.importActual<typeof import("./runtime/workspace-manager.js")>(
-    "./runtime/workspace-manager.js",
+vi.mock("../runtime/workspace-manager.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/workspace-manager.js")>(
+    "../runtime/workspace-manager.js",
   );
   return { ...actual, workspaceManager: { ensureChatCheckout, prepareRepository } };
 });
 
-vi.mock("./runtime/sandbox.js", async () => {
-  const actual = await vi.importActual<typeof import("./runtime/sandbox.js")>("./runtime/sandbox.js");
+vi.mock("../runtime/sandbox.js", async () => {
+  const actual = await vi.importActual<typeof import("../runtime/sandbox.js")>("../runtime/sandbox.js");
   return { ...actual, sandbox: { ensureContainer } };
 });
 
 const createdSessions: Array<Record<string, unknown>> = [];
 
-vi.mock("./db/store.js", () => ({
+vi.mock("../db/store.js", () => ({
   listRepositories: async (ownerUserId: string) =>
     ownerUserId === owner.id ? [ownedRepository] : [],
   getRepositoryForUser: async (repositoryId: string, userId: string) =>
@@ -121,7 +121,7 @@ vi.mock("./db/store.js", () => ({
   updateSessionEnvironment: async () => ownedSession,
 }));
 
-vi.mock("./db/github-store.js", () => ({
+vi.mock("../db/github-store.js", () => ({
   getGithubInstallationForUser: async () => undefined,
   linkUserToGithubInstallation: async () => undefined,
   listGithubInstallationsForUser: async (userId: string) =>
@@ -141,7 +141,7 @@ let server: Server;
 let origin: string;
 
 beforeAll(async () => {
-  const { createApi } = await import("./api.js");
+  const { createApi } = await import("../api.js");
   const app = createApi();
   server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));

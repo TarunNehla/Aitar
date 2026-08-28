@@ -14,7 +14,7 @@ interface InstallationRow {
 const installations = new Map<number, InstallationRow>();
 const repositoryAccess = new Map<number, string>();
 
-vi.mock("../db/github-store.js", () => ({
+vi.mock("../../db/github-store.js", () => ({
   upsertGithubInstallation: async (input: Omit<InstallationRow, "id">) => {
     const existing = installations.get(input.installationId);
     const row: InstallationRow = { id: existing?.id ?? `installation-${input.installationId}`, ...input };
@@ -42,7 +42,7 @@ vi.mock("../db/github-store.js", () => ({
   },
 }));
 
-const { handleWebhookEvent, verifyWebhookSignature } = await import("./webhook.js");
+const { handleWebhookEvent, verifyWebhookSignature } = await import("../webhook.js");
 
 const secret = "test-webhook-secret";
 

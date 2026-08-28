@@ -2,8 +2,8 @@ import { betterAuth } from "better-auth";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { createEmailVerificationToken } from "better-auth/api";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { baseAuthOptions } from "./auth.js";
-import { config } from "../config.js";
+import { baseAuthOptions } from "../auth.js";
+import { config } from "../../config.js";
 
 interface SentEmail {
   to: string[];

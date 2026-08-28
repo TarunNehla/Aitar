@@ -6,9 +6,9 @@ import {
   resetPasswordEmail,
   sendEmail,
   verificationEmail,
-} from "./email.js";
-import { config } from "../config.js";
-import { logger } from "../logger.js";
+} from "../email.js";
+import { config } from "../../config.js";
+import { logger } from "../../logger.js";
 
 const verifyUrl = "http://localhost:5173/api/auth/verify-email?token=secret-token-value&callbackURL=%2F";
 const resetUrl = "http://localhost:5173/api/auth/reset-password/secret-token-value?callbackURL=%2F";
@@ -128,7 +128,7 @@ describe("configuration", () => {
     vi.stubEnv("RESEND_API_KEY", "");
     vi.stubEnv("AUTH_EMAIL_FROM", "");
 
-    await expect(import("../config.js")).rejects.toThrow(/requires working email configuration/);
+    await expect(import("../../config.js")).rejects.toThrow(/requires working email configuration/);
 
     vi.unstubAllEnvs();
     vi.resetModules();
@@ -140,7 +140,7 @@ describe("configuration", () => {
     vi.stubEnv("RESEND_API_KEY", "re_test_key");
     vi.stubEnv("AUTH_EMAIL_FROM", "Aitar <not-an-address>");
 
-    await expect(import("../config.js")).rejects.toThrow(/AUTH_EMAIL_FROM/);
+    await expect(import("../../config.js")).rejects.toThrow(/AUTH_EMAIL_FROM/);
 
     vi.unstubAllEnvs();
     vi.resetModules();

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { runProcess } from "./runtime/process.js";
-import { schema } from "./db/schema.js";
+import { runProcess } from "../runtime/process.js";
+import { schema } from "../db/schema.js";
 
 const approvalWords = /approval|approvalBroker|waiting_for_approval|inspectCommand|command-policy/i;
 // GitHub's own org-owner approval of an App installation is not an agent permission.
@@ -33,8 +33,9 @@ describe("interactive permissions are gone", () => {
     }
     expect(offenders).toEqual([]);
 
-    expect(files).not.toContain("src/server/runtime/approval-broker.ts");
-    expect(files).not.toContain("src/server/runtime/command-policy.ts");
+    const names = files.map((path) => path.split("/").pop());
+    expect(names).not.toContain("approval-broker.ts");
+    expect(names).not.toContain("command-policy.ts");
     expect(Object.keys(schema)).not.toContain("approvalRequests");
   });
 
