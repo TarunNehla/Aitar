@@ -1,4 +1,4 @@
-import { Icon } from "../Icon";
+import { Icon } from "../../components/Icon";
 
 export function AuthStatus({ tone, message }: { tone: "error" | "success"; message: string }) {
   return (

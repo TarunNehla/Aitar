@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { Icon } from "../Icon";
+import { Icon } from "../../components/Icon";
 
 export function PasswordField({
   label,

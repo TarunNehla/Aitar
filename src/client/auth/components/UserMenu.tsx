@@ -13,10 +13,10 @@ import {
   type SocialProvider,
 } from "../auth-client";
 import { describePasswordProblem } from "../auth-flow";
-import { PasswordField } from "./auth/PasswordField";
-import { Icon } from "./Icon";
-import { ProviderIcon } from "./ProviderIcon";
-import { Spinner } from "./Spinner";
+import { PasswordField } from "./PasswordField";
+import { Icon } from "../../components/Icon";
+import { ProviderIcon } from "../../components/ProviderIcon";
+import { Spinner } from "../../components/Spinner";
 
 export interface SessionUser {
   id: string;

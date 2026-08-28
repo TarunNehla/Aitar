@@ -1,5 +1,5 @@
-import { brandName } from "../../auth-copy";
-import { Icon, type IconName } from "../Icon";
+import { brandName } from "../auth-copy";
+import { Icon, type IconName } from "../../components/Icon";
 
 export function AuthHeader({
   heading,

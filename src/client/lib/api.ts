@@ -1,4 +1,4 @@
-import { authClient } from "./auth-client";
+import { authClient } from "../auth/auth-client";
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(path, {

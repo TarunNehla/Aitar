@@ -1,8 +1,8 @@
 import { useRef, useState, type FormEvent } from "react";
-import { api } from "../api";
+import { api } from "../../lib/api";
 import { describeSetupError, repositoryNameFromUrl, repositoryUrlError } from "../repository";
-import { Icon } from "./Icon";
-import { Spinner } from "./Spinner";
+import { Icon } from "../../components/Icon";
+import { Spinner } from "../../components/Spinner";
 
 const fallbackModel = "deepseek/deepseek-v4-flash-0731";
 const stages = ["repository", "chat", "opening"] as const;

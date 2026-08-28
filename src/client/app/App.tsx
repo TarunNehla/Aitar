@@ -1,22 +1,22 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../shared/contracts";
-import { api } from "./api";
+import type { CodeChanges, FileChange, MessageView, SessionEvent } from "../../shared/contracts";
+import { api } from "../lib/api";
 import {
   clearAuthQueryParameters,
   readAuthQueryParameters,
   returnToSignIn,
   useAuthMethods,
   useSession,
-} from "./auth-client";
-import { readAuthEntry, signInEntry } from "./auth-flow";
-import { AuthScreen } from "./components/auth/AuthScreen";
-import { Dialog } from "./components/Dialog";
-import { Icon, type IconName } from "./components/Icon";
-import { RepositoryConnect } from "./components/RepositoryConnect";
-import { Spinner } from "./components/Spinner";
-import { UserMenu, type SessionUser } from "./components/UserMenu";
+} from "../auth/auth-client";
+import { readAuthEntry, signInEntry } from "../auth/auth-flow";
+import { AuthScreen } from "../auth/components/AuthScreen";
+import { Dialog } from "../components/Dialog";
+import { Icon, type IconName } from "../components/Icon";
+import { RepositoryConnect } from "../repository/components/RepositoryConnect";
+import { Spinner } from "../components/Spinner";
+import { UserMenu, type SessionUser } from "../auth/components/UserMenu";
 import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
 
 interface Repository {

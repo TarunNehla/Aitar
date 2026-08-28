@@ -14,7 +14,7 @@ import {
   signUp,
   unverifiedEmailNotice,
   type SocialProvider,
-} from "../../auth-client";
+} from "../auth-client";
 import {
   authFieldErrors,
   authLabels,
@@ -23,7 +23,7 @@ import {
   resendResult,
   resetPasswordSuccess,
   socialAccountHint,
-} from "../../auth-copy";
+} from "../auth-copy";
 import {
   describePasswordProblem,
   looksLikeEmail,
@@ -31,8 +31,8 @@ import {
   type AuthEntry,
   type AuthFieldErrors,
   type AuthFlow,
-} from "../../auth-flow";
-import { Spinner } from "../Spinner";
+} from "../auth-flow";
+import { Spinner } from "../../components/Spinner";
 import { AuthCard } from "./AuthCard";
 import { AuthField } from "./AuthField";
 import { AuthHeader } from "./AuthHeader";

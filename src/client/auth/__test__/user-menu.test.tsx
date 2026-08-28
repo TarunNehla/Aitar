@@ -13,8 +13,8 @@ let authMethods: { emailPassword: boolean } | null = { emailPassword: true };
 const changePassword = vi.fn<(input: Record<string, unknown> & CallOptions) => Promise<Reply>>();
 const requestPasswordReset = vi.fn<(input: Record<string, unknown> & CallOptions) => Promise<Reply>>();
 
-vi.mock("./auth-client", async () => {
-  const actual = await vi.importActual<typeof import("./auth-client")>("./auth-client");
+vi.mock("../auth-client", async () => {
+  const actual = await vi.importActual<typeof import("../auth-client")>("../auth-client");
   return {
     ...actual,
     useAuthMethods: () => authMethods,
@@ -26,7 +26,7 @@ vi.mock("./auth-client", async () => {
   };
 });
 
-const { UserMenu } = await import("./components/UserMenu");
+const { UserMenu } = await import("../components/UserMenu");
 
 const user = { id: "user-1", name: "Ada Lovelace", email: "ada@example.com", image: null };
 

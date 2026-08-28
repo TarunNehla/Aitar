@@ -14,8 +14,8 @@ const signOutMock = vi.fn(async () => {
   sessionState = { data: null, isPending: false };
 });
 
-vi.mock("./auth-client", async () => {
-  const actual = await vi.importActual<typeof import("./auth-client")>("./auth-client");
+vi.mock("../../auth/auth-client", async () => {
+  const actual = await vi.importActual<typeof import("../../auth/auth-client")>("../../auth/auth-client");
   return {
     ...actual,
     useSession: () => sessionState,
@@ -61,7 +61,7 @@ let sessionPullRequests: unknown[] = [];
 let sessionRuns: unknown[] = [];
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock("./api", () => ({ api: apiMock }));
+vi.mock("../../lib/api", () => ({ api: apiMock }));
 
 function respond(path: string, options?: RequestInit) {
   if (path === "/api/repositories") return { repositories };
@@ -173,7 +173,7 @@ function toolMessage(id: string, toolName: string, data: Record<string, unknown>
   };
 }
 
-const { App } = await import("./App");
+const { App } = await import("../App");
 
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
@@ -921,7 +921,7 @@ describe("branch information is gone from the interface", () => {
   });
 
   it("keeps branch names, refs, and whole chat ids out of the console source", async () => {
-    const app = readFileSync(resolve(process.cwd(), "src/client/App.tsx"), "utf8");
+    const app = readFileSync(resolve(process.cwd(), "src/client/app/App.tsx"), "utf8");
     const styles = readFileSync(resolve(process.cwd(), "src/client/styles.css"), "utf8");
 
     for (const term of ["branchName", "headBranch", "baseBranch", "defaultBranch", "branch_published", "git-branch"]) {

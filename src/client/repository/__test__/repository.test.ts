@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeSetupError, repositoryNameFromUrl, repositoryUrlError } from "./repository";
+import { describeSetupError, repositoryNameFromUrl, repositoryUrlError } from "../repository";
 
 describe("repositoryUrlError", () => {
   it("accepts a public GitHub repository URL", () => {

@@ -44,7 +44,7 @@ describe("interactive permissions are gone", () => {
   });
 
   it("keeps no approval state or card in the console", async () => {
-    const app = await readFile("src/client/App.tsx", "utf8");
+    const app = await readFile("src/client/app/App.tsx", "utf8");
     const styles = await readFile("src/client/styles.css", "utf8");
     expect(app).not.toMatch(/Approval/);
     expect(styles).not.toContain(".approval-card");

@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
-vi.mock("./api", () => ({ api: apiMock }));
+vi.mock("../../lib/api", () => ({ api: apiMock }));
 
 const installations = [
   {
@@ -39,7 +39,7 @@ function respond(path: string) {
   return {};
 }
 
-const { RepositoryConnect, onboardingQuestion } = await import("./components/RepositoryConnect");
+const { RepositoryConnect, onboardingQuestion } = await import("../components/RepositoryConnect");
 
 beforeEach(() => {
   githubInstallations = installations;

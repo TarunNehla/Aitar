@@ -1,6 +1,6 @@
-import { providerLabels, type SocialProvider } from "../../auth-client";
-import { ProviderIcon } from "../ProviderIcon";
-import { Spinner } from "../Spinner";
+import { providerLabels, type SocialProvider } from "../auth-client";
+import { ProviderIcon } from "../../components/ProviderIcon";
+import { Spinner } from "../../components/Spinner";
 
 const providers: SocialProvider[] = ["google", "github"];
 

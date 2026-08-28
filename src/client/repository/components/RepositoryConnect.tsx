@@ -1,16 +1,16 @@
 import { useState, type ReactNode } from "react";
-import { api } from "../api";
+import { api } from "../../lib/api";
 import { describeSetupError } from "../repository";
-import { Dialog } from "./Dialog";
+import { Dialog } from "../../components/Dialog";
 import {
   GitHubRepositoryPicker,
   type GitHubInstallation,
   type GitHubRepository,
 } from "./GitHubRepositoryPicker";
-import { Icon } from "./Icon";
-import { ProviderIcon } from "./ProviderIcon";
+import { Icon } from "../../components/Icon";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import { RepositorySetup } from "./RepositorySetup";
-import { Spinner } from "./Spinner";
+import { Spinner } from "../../components/Spinner";
 
 const sources = ["github", "public"] as const;
 type Source = (typeof sources)[number];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
+import { defaultSessionTitle, deriveSessionTitle } from "../session-title";
 
 describe("deriveSessionTitle", () => {
   it("keeps the default when there is nothing to read", () => {

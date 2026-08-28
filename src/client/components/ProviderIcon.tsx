@@ -1,4 +1,4 @@
-import type { SocialProvider } from "../auth-client";
+import type { SocialProvider } from "../auth/auth-client";
 
 function GoogleMark({ size }: { size: number }) {
   return (

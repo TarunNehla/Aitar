@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "../api";
-import { Icon } from "./Icon";
-import { Spinner } from "./Spinner";
+import { api } from "../../lib/api";
+import { Icon } from "../../components/Icon";
+import { Spinner } from "../../components/Spinner";
 
 export interface GitHubInstallation {
   installationId: number;

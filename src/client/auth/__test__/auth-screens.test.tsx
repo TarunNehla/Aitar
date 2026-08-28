@@ -14,8 +14,8 @@ const sendVerificationEmail = vi.fn<(input: Record<string, unknown> & CallOption
 const requestPasswordReset = vi.fn<(input: Record<string, unknown> & CallOptions) => Promise<Reply>>();
 const resetPassword = vi.fn<(input: Record<string, unknown> & CallOptions) => Promise<Reply>>();
 
-vi.mock("./auth-client", async () => {
-  const actual = await vi.importActual<typeof import("./auth-client")>("./auth-client");
+vi.mock("../auth-client", async () => {
+  const actual = await vi.importActual<typeof import("../auth-client")>("../auth-client");
   return {
     ...actual,
     signIn: { email: signInEmail, social: signInSocial },
@@ -26,8 +26,8 @@ vi.mock("./auth-client", async () => {
   };
 });
 
-const { AuthScreen } = await import("./components/auth/AuthScreen");
-const { readAuthEntry, signInEntry } = await import("./auth-flow");
+const { AuthScreen } = await import("../components/AuthScreen");
+const { readAuthEntry, signInEntry } = await import("../auth-flow");
 
 function renderAuth(entry = signInEntry, emailPassword = true) {
   return render(<AuthScreen entry={entry} emailPassword={emailPassword} />);
