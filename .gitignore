@@ -10,3 +10,5 @@ coverage/
 *.log
 chatgpt.json
 claude.json
+
+.deploy/
