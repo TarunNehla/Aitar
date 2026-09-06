@@ -21,8 +21,13 @@ jobs:
           DOKPLOY_WEBHOOK_URL: ${{ secrets.DOKPLOY_WEBHOOK_URL }}
         run: |
           test -n "$DOKPLOY_WEBHOOK_URL"
-          curl --fail-with-body --silent --show-error \
+          response=$(curl --fail-with-body --silent --show-error \
             --retry 3 --retry-all-errors --max-time 30 \
             --header "Content-Type: application/json" \
+            --header "X-GitHub-Event: push" \
             --data-binary "@$GITHUB_EVENT_PATH" \
-            "$DOKPLOY_WEBHOOK_URL"
+            "$DOKPLOY_WEBHOOK_URL")
+          printf '%s\n' "$response"
+          jq --exit-status \
+            '.message == "Compose deployed successfully"' \
+            <<< "$response" >/dev/null
