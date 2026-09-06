@@ -3,8 +3,17 @@ import { api } from "../../lib/api";
 import { describeSetupError, repositoryNameFromUrl, repositoryUrlError } from "../repository";
 import { Icon } from "../../components/Icon";
 import { Spinner } from "../../components/Spinner";
+import {
+  asThinkingLevel,
+  defaultModelId,
+  defaultThinkingLevelFor,
+  findModel,
+  modelCatalog,
+  thinkingLabels,
+  thinkingLevelsFor,
+  type ThinkingLevel,
+} from "../../../shared/models";
 
-const fallbackModel = "deepseek/deepseek-v4-flash-0731";
 const stages = ["repository", "chat", "opening"] as const;
 type Stage = (typeof stages)[number];
 
@@ -25,7 +34,10 @@ export function RepositorySetup({
 }) {
   const [repositoryUrl, setRepositoryUrl] = useState("");
   const [name, setName] = useState("");
-  const [model, setModel] = useState(defaultModel ?? fallbackModel);
+  // The previous chat's model only carries over while it is still on offer.
+  const initialModel = findModel(defaultModel ?? "") ? (defaultModel as string) : defaultModelId;
+  const [model, setModel] = useState(initialModel);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(defaultThinkingLevelFor(initialModel));
   const [stage, setStage] = useState<Stage | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const nameEditedRef = useRef(false);
@@ -63,7 +75,7 @@ export function RepositorySetup({
         `/api/repositories/${repositoryIdRef.current}/chats`,
         {
           method: "POST",
-          body: JSON.stringify({ title: "New session", model: model.trim() }),
+          body: JSON.stringify({ title: "New session", model, thinkingLevel }),
         },
       );
 
@@ -115,13 +127,32 @@ export function RepositorySetup({
           </label>
           <label>
             <span>Model</span>
-            <input
+            <select
               name="model"
               value={model}
-              onChange={(event) => setModel(event.target.value)}
+              onChange={(event) => {
+                setModel(event.target.value);
+                setThinkingLevel(defaultThinkingLevelFor(event.target.value));
+              }}
               disabled={busy}
-              required
-            />
+            >
+              {modelCatalog.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Thinking</span>
+            <select
+              name="thinkingLevel"
+              value={thinkingLevel}
+              onChange={(event) => setThinkingLevel(asThinkingLevel(event.target.value))}
+              disabled={busy}
+            >
+              {thinkingLevelsFor(model).map((level) => (
+                <option key={level} value={level}>{thinkingLabels[level]}</option>
+              ))}
+            </select>
           </label>
         </div>
       </details>

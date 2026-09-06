@@ -855,7 +855,8 @@ button:disabled { cursor: not-allowed; }
 
 .setup-form { display: grid; gap: var(--space-7); width: 100%; }
 .setup-form label { display: grid; gap: var(--space-3); color: var(--text-body); font: var(--type-ui); }
-.setup-form input {
+.setup-form input,
+.setup-form select {
   width: 100%;
   height: var(--control-height);
   padding: 0 var(--space-6);
@@ -868,9 +869,12 @@ button:disabled { cursor: not-allowed; }
   font-size: var(--text-sm);
   transition: var(--transition-control);
 }
+.setup-form select { padding-right: var(--space-4); }
 .setup-form input::placeholder { color: var(--text-faint); }
-.setup-form input:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
-.setup-form input:disabled { color: var(--text-muted); background: var(--surface-sunken); }
+.setup-form input:focus,
+.setup-form select:focus { border-color: var(--border-focus); box-shadow: var(--focus-ring); }
+.setup-form input:disabled,
+.setup-form select:disabled { color: var(--text-muted); background: var(--surface-sunken); }
 .setup-actions { display: grid; }
 .setup-actions .primary-button { height: var(--control-height-lg); font-size: var(--text-md); }
 
@@ -1350,6 +1354,7 @@ button:disabled { cursor: not-allowed; }
   .onboarding-panel { padding: var(--space-8) var(--space-7); }
   .auth-field input,
   .setup-form input,
+  .setup-form select,
   .auth-submit,
   .provider-button,
   .setup-actions .primary-button,

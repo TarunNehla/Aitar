@@ -18,6 +18,15 @@ import { RepositoryConnect } from "../repository/components/RepositoryConnect";
 import { Spinner } from "../components/Spinner";
 import { UserMenu, type SessionUser } from "../auth/components/UserMenu";
 import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
+import {
+  asThinkingLevel,
+  defaultThinkingLevelFor,
+  modelCatalog,
+  resolveThinkingLevel,
+  thinkingLabels,
+  thinkingLevelsFor,
+  type ThinkingLevel,
+} from "../../shared/models";
 
 interface Repository {
   id: string;
@@ -31,6 +40,7 @@ interface SessionListItem {
     title: string;
     repositoryId: string;
     defaultModel: string;
+    defaultThinkingLevel: string;
     status: string;
     baseCommit: string | null;
     headCommit: string | null;
@@ -104,8 +114,6 @@ const agentStatusInterval = 2_400;
 const workspaceRoot = "/workspace";
 const repositoryRootLabel = "repository";
 
-/** Frontend-only until models are managed server side. */
-const modelOptions = [{ value: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash" }];
 
 /** Container paths are an implementation detail, so the thread shows repository-relative ones. */
 function repositoryPath(value: string): string {
@@ -903,6 +911,31 @@ function Console({
     if (first) titleFromFirstMessage(detail.session.id, messageText(first));
   }, [detail, titleFromFirstMessage]);
 
+  /** The next run reads these off the session, so the choice has to reach the server. */
+  const selectModel = useCallback(
+    async (sessionId: string, next: { model: string; thinkingLevel: ThinkingLevel }) => {
+      const patch = { defaultModel: next.model, defaultThinkingLevel: next.thinkingLevel };
+      setSessions((current) =>
+        current.map((item) =>
+          item.session.id === sessionId ? { ...item, session: { ...item.session, ...patch } } : item,
+        ),
+      );
+      setDetail((current) =>
+        current?.session.id === sessionId ? { ...current, session: { ...current.session, ...patch } } : current,
+      );
+      try {
+        await api(`/api/sessions/${sessionId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ model: next.model, thinkingLevel: next.thinkingLevel }),
+        });
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        await loadDetail(sessionId, true);
+      }
+    },
+    [loadDetail],
+  );
+
   const openSession = useCallback(async (sessionId: string) => {
     await Promise.all([loadRepositories(), loadSessions()]);
     setSelectedId(sessionId);
@@ -1137,6 +1170,13 @@ function Console({
             <Composer
               working={Boolean(activeRun)}
               model={detail.session.defaultModel}
+              // Resolved, not raw: a stored level the model no longer accepts is what the
+              // run will clamp anyway, so the select has to show the level that will be used.
+              thinkingLevel={resolveThinkingLevel(
+                detail.session.defaultModel,
+                asThinkingLevel(detail.session.defaultThinkingLevel),
+              )}
+              onModelChange={(next) => void selectModel(detail.session.id, next)}
               onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
               onSend={async (text) => {
                 const sessionId = detail.session.id;
@@ -1381,36 +1421,78 @@ function MarkdownText({ children }: { children: string }) {
   );
 }
 
-/** One option today, but a real select so the list can grow without a redesign. */
-function ModelSelect({ model }: { model: string }) {
-  const [selected, setSelected] = useState(model);
-  const known = modelOptions.some((option) => option.value === selected);
+/**
+ * Model and thinking effort, as two borderless selects. Effort levels are per-model,
+ * so switching model drops to that model's own default rather than an unsupported level.
+ */
+function ModelSelect({
+  model,
+  thinkingLevel,
+  onChange,
+}: {
+  model: string;
+  thinkingLevel: ThinkingLevel;
+  onChange: (next: { model: string; thinkingLevel: ThinkingLevel }) => void;
+}) {
+  const [selected, setSelected] = useState({ model, thinkingLevel });
+  const known = modelCatalog.some((option) => option.id === selected.model);
+  const levels = thinkingLevelsFor(selected.model);
+
+  function apply(next: { model: string; thinkingLevel: ThinkingLevel }) {
+    setSelected(next);
+    onChange(next);
+  }
 
   return (
-    <div className="model-select">
-      <select
-        aria-label="Model"
-        value={selected}
-        onChange={(event) => setSelected(event.target.value)}
-      >
-        {!known && <option value={selected} disabled>{selected}</option>}
-        {modelOptions.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-      <Icon name="chevron-down" size={14} />
-    </div>
+    <>
+      <div className="model-select">
+        <select
+          aria-label="Model"
+          value={selected.model}
+          onChange={(event) =>
+            apply({
+              model: event.target.value,
+              thinkingLevel: defaultThinkingLevelFor(event.target.value),
+            })
+          }
+        >
+          {!known && <option value={selected.model} disabled>{selected.model}</option>}
+          {modelCatalog.map((option) => (
+            <option key={option.id} value={option.id}>{option.label}</option>
+          ))}
+        </select>
+        <Icon name="chevron-down" size={14} />
+      </div>
+      <div className="model-select">
+        <select
+          aria-label="Thinking"
+          value={selected.thinkingLevel}
+          onChange={(event) =>
+            apply({ model: selected.model, thinkingLevel: asThinkingLevel(event.target.value) })
+          }
+        >
+          {levels.map((level) => (
+            <option key={level} value={level}>{thinkingLabels[level]}</option>
+          ))}
+        </select>
+        <Icon name="chevron-down" size={14} />
+      </div>
+    </>
   );
 }
 
 function Composer({
   working,
   model,
+  thinkingLevel,
+  onModelChange,
   onSend,
   onCancel,
 }: {
   working: boolean;
   model: string;
+  thinkingLevel: ThinkingLevel;
+  onModelChange: (next: { model: string; thinkingLevel: ThinkingLevel }) => void;
   onSend: (text: string) => Promise<void>;
   onCancel?: () => Promise<unknown>;
 }) {
@@ -1460,7 +1542,12 @@ function Composer({
           rows={1}
         />
         <div className="composer-actions">
-          <ModelSelect model={model} key={model} />
+          <ModelSelect
+            model={model}
+            thinkingLevel={thinkingLevel}
+            onChange={onModelChange}
+            key={`${model}:${thinkingLevel}`}
+          />
           <button
             className="send-button"
             type={stopping ? "button" : "submit"}

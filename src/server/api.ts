@@ -50,6 +50,7 @@ import {
   listSessions,
   markRunCancelling,
   updateRepositoryFetched,
+  updateSessionModel,
   updateSessionTitle,
   type Access,
   type RepositoryRow,
@@ -58,6 +59,12 @@ import {
 import { eventHub } from "./events/event-hub.js";
 import { activeRuns } from "./runtime/agent/agent-runner.js";
 import { validateRepositoryUrl, workspaceManager } from "./runtime/workspace/workspace-manager.js";
+import {
+  defaultThinkingLevelFor,
+  modelCatalog,
+  resolveThinkingLevel,
+  thinkingLevels,
+} from "../shared/models.js";
 
 const apiLogger = logger.child({ component: "api" });
 
@@ -72,18 +79,30 @@ const githubRepositoryInput = z.object({
   name: z.string().trim().min(1).max(100).optional(),
 });
 
+const modelInput = z.enum(modelCatalog.map((option) => option.id) as [string, ...string[]]);
+
 const sessionInput = z.object({
   title: z.string().trim().min(1).max(120).default("New session"),
-  model: z.string().trim().min(1).optional(),
+  model: modelInput.optional(),
+  thinkingLevel: z.enum(thinkingLevels).optional(),
 });
 
-const sessionTitleInput = z.object({
-  title: z.string().trim().min(1).max(120),
-});
+/** Every field is optional so the composer can change the model without touching the title. */
+const sessionUpdateInput = z
+  .object({
+    title: z.string().trim().min(1).max(120).optional(),
+    model: modelInput.optional(),
+    thinkingLevel: z.enum(thinkingLevels).optional(),
+  })
+  .refine(
+    (value) => value.title !== undefined || value.model !== undefined || value.thinkingLevel !== undefined,
+    { message: "Provide a title, a model, or a thinking level" },
+  );
 
 const messageInput = z.object({
   text: z.string().trim().min(1).max(100_000),
-  model: z.string().trim().min(1).optional(),
+  model: modelInput.optional(),
+  thinkingLevel: z.enum(thinkingLevels).optional(),
   parentMessageId: z.string().uuid().nullable().optional(),
 });
 
@@ -385,6 +404,7 @@ export function createApi() {
         repositoryId: repository.id,
         title: input.title,
         model: input.model,
+        thinkingLevel: input.thinkingLevel,
         baseBranch: repository.defaultBranch,
       });
       response.status(201).json({ session: sessionView(session) });
@@ -430,11 +450,25 @@ export function createApi() {
   app.patch(
     "/api/sessions/:sessionId",
     asyncRoute(async (request, response) => {
-      const input = sessionTitleInput.parse(request.body);
+      const input = sessionUpdateInput.parse(request.body);
       const relation = await requireSession(request, response);
       if (!relation) return;
 
-      const session = await updateSessionTitle(relation.session.id, input.title);
+      const sessionId = relation.session.id;
+      let session = relation.session;
+      if (input.title !== undefined) session = await updateSessionTitle(sessionId, input.title);
+      if (input.model !== undefined || input.thinkingLevel !== undefined) {
+        const model = input.model ?? session.defaultModel;
+        session = await updateSessionModel({
+          sessionId,
+          model,
+          // A model change without a level lands on that model's own default rather than
+          // carrying over a level the new model may not accept.
+          thinkingLevel: input.thinkingLevel
+            ? resolveThinkingLevel(model, input.thinkingLevel)
+            : defaultThinkingLevelFor(model),
+        });
+      }
       response.json({ session: sessionView(session) });
     }),
   );

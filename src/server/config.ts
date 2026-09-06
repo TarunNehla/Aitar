@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadEnvFile } from "node:process";
 import { z } from "zod";
+import { defaultModelId } from "../shared/models.js";
 
 if (existsSync(".env")) loadEnvFile(".env");
 
@@ -19,7 +20,7 @@ const envSchema = z.object({
   ...contextCompactionEnvFields,
   DATABASE_URL: z.string().min(1),
   OPENROUTER_API_KEY: z.string().min(1).optional(),
-  OPENROUTER_MODEL: z.string().default("deepseek/deepseek-v4-flash-0731"),
+  OPENROUTER_MODEL: z.string().default(defaultModelId),
   OPENROUTER_PROVIDERS: z.string().default(""),
   OPENROUTER_ALLOW_FALLBACKS: z.enum(["true", "false"]).default("true"),
   PORT: z.coerce.number().int().positive().default(3000),

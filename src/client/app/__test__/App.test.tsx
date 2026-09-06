@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { modelCatalog } from "../../../shared/models";
 
 interface SessionState {
   data: { user: { id: string; name: string; email: string; image: string | null } } | null;
@@ -45,6 +46,7 @@ function newSession(title = "Private chat title") {
       title,
       repositoryId: "repository-1",
       defaultModel: deepseekModel,
+      defaultThinkingLevel: "high",
       status: "active",
       baseCommit: "3f9a17c4b2e58d06a1c7f3e9b0d2a4c6e8f01234",
       headCommit: "7b1d24e8a3c05f96b2d8e1a7c4f60b3d9e520187",
@@ -59,6 +61,7 @@ let sessions = [newSession()];
 let sessionMessages: unknown[] = [];
 let sessionPullRequests: unknown[] = [];
 let sessionRuns: unknown[] = [];
+let patched: Array<{ path: string; body: Record<string, unknown> }> = [];
 
 const { apiMock } = vi.hoisted(() => ({ apiMock: vi.fn() }));
 vi.mock("../../lib/api", () => ({ api: apiMock }));
@@ -67,8 +70,21 @@ function respond(path: string, options?: RequestInit) {
   if (path === "/api/repositories") return { repositories };
   if (path === "/api/sessions") return { sessions };
   if (options?.method === "PATCH") {
-    const { title } = JSON.parse(String(options.body)) as { title: string };
-    sessions = sessions.map((item) => ({ ...item, session: { ...item.session, title } }));
+    const body = JSON.parse(String(options.body)) as {
+      title?: string;
+      model?: string;
+      thinkingLevel?: string;
+    };
+    patched.push({ path, body });
+    sessions = sessions.map((item) => ({
+      ...item,
+      session: {
+        ...item.session,
+        ...(body.title === undefined ? {} : { title: body.title }),
+        ...(body.model === undefined ? {} : { defaultModel: body.model }),
+        ...(body.thinkingLevel === undefined ? {} : { defaultThinkingLevel: body.thinkingLevel }),
+      },
+    }));
     return { session: sessions[0].session };
   }
   if (path.endsWith("/messages")) return { message: { id: "message-sent" } };
@@ -181,6 +197,7 @@ beforeEach(() => {
   sessionMessages = [];
   sessionPullRequests = [];
   sessionRuns = [];
+  patched = [];
   sessionState = { data: null, isPending: false };
   authMethods = { emailPassword: true };
   signOutMock.mockClear();
@@ -819,18 +836,72 @@ describe("composer metadata", () => {
     expect(document.querySelector(".composer")?.textContent).not.toContain("Model");
   });
 
-  it("offers DeepSeek as the only model, labelled for people", async () => {
+  it("offers every catalogued model, labelled for people rather than by id", async () => {
     await openConsole();
 
     await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
     const select = screen.getByLabelText("Model") as HTMLSelectElement;
     const options = [...select.options];
 
-    expect(options).toHaveLength(1);
-    expect(options[0].textContent).toBe("DeepSeek V4 Flash");
-    expect(options[0].value).toBe(deepseekModel);
+    expect(options.map((option) => option.value)).toEqual(modelCatalog.map((option) => option.id));
+    expect(options.map((option) => option.textContent)).toEqual(modelCatalog.map((option) => option.label));
     expect(select.value).toBe(deepseekModel);
     expect(document.body.textContent).not.toContain(deepseekModel);
+  });
+
+  it("offers only the thinking levels the selected model accepts", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const thinking = screen.getByLabelText("Thinking") as HTMLSelectElement;
+
+    expect([...thinking.options].map((option) => option.value)).toEqual(["off", "low", "high", "max"]);
+    expect(thinking.value).toBe("high");
+  });
+
+  it("shows the level a stored one resolves to, not the stored one the model rejects", async () => {
+    // Every row backfilled by the migration reads "medium", which DeepSeek does not accept.
+    sessions = [
+      { ...newSession(), session: { ...newSession().session, defaultThinkingLevel: "medium" } },
+    ];
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const thinking = screen.getByLabelText("Thinking") as HTMLSelectElement;
+
+    expect([...thinking.options].map((option) => option.value)).not.toContain("medium");
+    expect(thinking.value).toBe("high");
+  });
+
+  it("persists a model change and drops to that model's own default thinking level", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    const select = screen.getByLabelText("Model") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "google/gemini-3.8-flash" } });
+
+    await waitFor(() =>
+      expect(
+        patched.find((entry) => entry.path === "/api/sessions/session-1")?.body,
+      ).toEqual({ model: "google/gemini-3.8-flash", thinkingLevel: "medium" }),
+    );
+
+    const thinking = screen.getByLabelText("Thinking") as HTMLSelectElement;
+    expect([...thinking.options].map((option) => option.value)).toEqual(["low", "medium", "high"]);
+    expect(thinking.value).toBe("medium");
+  });
+
+  it("persists a thinking level change on its own", async () => {
+    await openConsole();
+
+    await waitFor(() => expect(document.querySelector(".model-select")).not.toBeNull());
+    fireEvent.change(screen.getByLabelText("Thinking"), { target: { value: "max" } });
+
+    await waitFor(() =>
+      expect(
+        patched.find((entry) => entry.path === "/api/sessions/session-1")?.body,
+      ).toEqual({ model: deepseekModel, thinkingLevel: "max" }),
+    );
   });
 
   it("disables a model the session uses that is no longer offered", async () => {

@@ -27,6 +27,7 @@ import {
   updateSessionHead,
 } from "../../db/store.js";
 import type { MessageView } from "../../../shared/contracts.js";
+import { asThinkingLevel, resolveThinkingLevel } from "../../../shared/models.js";
 import { withRepositoryGitAccess } from "../../github/repository-access.js";
 import { errorForLog, logger } from "../../logger.js";
 import { createAgentTools } from "./agent-tools.js";
@@ -134,6 +135,7 @@ interface ClaimedRun {
   session_id: string;
   user_message_id: string;
   model: string;
+  thinking_level: string;
   max_cost_usd: number;
   max_turns: number;
 }
@@ -425,8 +427,10 @@ export class AgentWorker {
 
       const capability = await modelCapabilities.capabilityOf(run.model);
       const contextWindow = await resolveContextWindow(run.model);
+      const thinkingLevel = resolveThinkingLevel(run.model, asThinkingLevel(run.thinking_level));
       await writer.emit("run_started", {
         model: run.model,
+        thinkingLevel,
         workerId: this.workerId,
         imageInput: capability.supportsImages,
         capabilitySource: capability.source,
@@ -523,7 +527,7 @@ export class AgentWorker {
         initialState: {
           systemPrompt,
           model,
-          thinkingLevel: "medium",
+          thinkingLevel,
           tools,
           messages: history,
         },

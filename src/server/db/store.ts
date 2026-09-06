@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, ne } from "drizzle-orm";
 import type { MessageView, SessionEvent } from "../../shared/contracts.js";
+import { asThinkingLevel, defaultThinkingLevelFor, type ThinkingLevel } from "../../shared/models.js";
 import { config } from "../config.js";
 import { eventHub } from "../events/event-hub.js";
 import { db, sql } from "./client.js";
@@ -98,7 +99,9 @@ export async function createSession(input: {
   title: string;
   baseBranch: string;
   model?: string;
+  thinkingLevel?: ThinkingLevel;
 }) {
+  const model = input.model ?? config.OPENROUTER_MODEL;
   const [session] = await db
     .insert(chatSessions)
     .values({
@@ -106,8 +109,26 @@ export async function createSession(input: {
       repositoryId: input.repositoryId,
       title: input.title,
       baseBranch: input.baseBranch,
-      defaultModel: input.model ?? config.OPENROUTER_MODEL,
+      defaultModel: model,
+      defaultThinkingLevel: input.thinkingLevel ?? defaultThinkingLevelFor(model),
     })
+    .returning();
+  return session;
+}
+
+export async function updateSessionModel(input: {
+  sessionId: string;
+  model: string;
+  thinkingLevel: ThinkingLevel;
+}) {
+  const [session] = await db
+    .update(chatSessions)
+    .set({
+      defaultModel: input.model,
+      defaultThinkingLevel: input.thinkingLevel,
+      updatedAt: new Date(),
+    })
+    .where(eq(chatSessions.id, input.sessionId))
     .returning();
   return session;
 }
@@ -266,6 +287,7 @@ export async function createUserMessageAndRun(input: {
   sessionId: string;
   text: string;
   model?: string;
+  thinkingLevel?: ThinkingLevel;
   parentMessageId?: string | null;
 }) {
   return db.transaction(async (tx) => {
@@ -319,6 +341,7 @@ export async function createUserMessageAndRun(input: {
         sessionId: input.sessionId,
         userMessageId: message.id,
         model: input.model ?? session.defaultModel,
+        thinkingLevel: input.thinkingLevel ?? asThinkingLevel(session.defaultThinkingLevel),
         maxCostUsd: config.RUN_MAX_COST_USD,
         maxTurns: config.RUN_MAX_TURNS,
       })
@@ -557,7 +580,15 @@ export async function listEvents(sessionId: string, after = 0, limit = 500): Pro
 
 export async function claimPendingRun(workerId: string) {
   const [claimed] = await sql<
-    Array<{ id: string; session_id: string; user_message_id: string; model: string; max_cost_usd: number; max_turns: number }>
+    Array<{
+      id: string;
+      session_id: string;
+      user_message_id: string;
+      model: string;
+      thinking_level: string;
+      max_cost_usd: number;
+      max_turns: number;
+    }>
   >`
     UPDATE runs
     SET status = 'running',
@@ -573,7 +604,7 @@ export async function claimPendingRun(workerId: string) {
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
-    RETURNING id, session_id, user_message_id, model, max_cost_usd, max_turns
+    RETURNING id, session_id, user_message_id, model, thinking_level, max_cost_usd, max_turns
   `;
   return claimed;
 }

@@ -104,7 +104,19 @@ Screenshots appear inline in the chat as thumbnails and open full size through a
 
 ## Model routing
 
-`OPENROUTER_MODEL` picks the model. OpenRouter then picks one of its upstream inference providers for that model.
+Each chat carries its own model and thinking level, both chosen from the composer and stored on the session. `OPENROUTER_MODEL` is only the starting point for a chat that names neither.
+
+| Model | Thinking levels | Default |
+| --- | --- | --- |
+| `z-ai/glm-5.3` | low, high, max | max |
+| `z-ai/glm-5.3-flash` | low, high, max | max |
+| `google/gemini-3.8-flash` | low, medium, high | medium |
+| `google/gemini-3.5-flash-lite` | minimal, low, medium, high | minimal |
+| `deepseek/deepseek-v4-flash-0731` | off, low, high, max | high |
+
+The levels come from the `reasoning` block OpenRouter publishes per model, so every level offered is one the upstream provider accepts. Only DeepSeek can switch reasoning off; the rest require it. A level a model does not accept resolves to the nearest one it does, reaching up before down. Add a model by extending `modelCatalog` in `src/shared/models.ts`, which the composer, the setup form, and the API all validate against.
+
+OpenRouter then picks one of its upstream inference providers for the chosen model.
 
 The provider table on an OpenRouter model page is informational. A provider is chosen only with the `provider` field on the request body, which the backend adds when `OPENROUTER_PROVIDERS` names one.
 
@@ -117,7 +129,7 @@ By default no `provider` field is sent, so OpenRouter routes each request itself
 
 ```json
 {
-  "model": "deepseek/deepseek-v4-flash-0731",
+  "model": "z-ai/glm-5.3-flash",
   "messages": []
 }
 ```
