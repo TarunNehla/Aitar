@@ -1,0 +1,28 @@
+name: Deploy production
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  trigger-dokploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Trigger Dokploy deployment
+        env:
+          DOKPLOY_WEBHOOK_URL: ${{ secrets.DOKPLOY_WEBHOOK_URL }}
+        run: |
+          test -n "$DOKPLOY_WEBHOOK_URL"
+          curl --fail-with-body --silent --show-error \
+            --retry 3 --retry-all-errors --max-time 30 \
+            --header "Content-Type: application/json" \
+            --data-binary "@$GITHUB_EVENT_PATH" \
+            "$DOKPLOY_WEBHOOK_URL"
