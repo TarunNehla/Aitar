@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import express from "express";
 import { createApi } from "./api.js";
 import { closeDatabase } from "./db/client.js";
-import { agentWorker } from "./runtime/agent/agent-runner.js";
+import { recoverStaleRuns } from "./db/store.js";
 import { config } from "./config.js";
 import { errorForLog, logger } from "./logger.js";
 import { ensureAskpassHelper } from "./runtime/workspace/git-credentials.js";
@@ -23,7 +23,7 @@ if (config.NODE_ENV === "production" && existsSync(clientDirectory)) {
 
 const server = app.listen(config.PORT, () => {
   void ensureAskpassHelper()
-    .then(() => agentWorker.start())
+    .then(() => recoverStaleRuns())
     .then(() => browserSidecar.sweepOrphans())
     .then(() => {
       environmentReaper.start();
@@ -32,7 +32,7 @@ const server = app.listen(config.PORT, () => {
         {
           port: config.PORT,
           environment: config.NODE_ENV,
-          maxActiveRuns: config.MAX_ACTIVE_RUNS,
+          maxContainerSlots: config.MAX_CONTAINER_SLOTS,
           defaultModel: config.OPENROUTER_MODEL,
           inferenceProviders: config.OPENROUTER_PROVIDERS,
           allowProviderFallbacks: config.OPENROUTER_ALLOW_FALLBACKS,
@@ -41,7 +41,7 @@ const server = app.listen(config.PORT, () => {
       );
     })
     .catch((error) => {
-      logger.fatal({ error: errorForLog(error) }, "Agent worker failed to start");
+      logger.fatal({ error: errorForLog(error) }, "Startup failed");
       void shutdown("startup_failure", 1);
     });
 });
@@ -52,7 +52,6 @@ async function shutdown(reason: string, exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info({ reason }, "Backend shutdown started");
-  agentWorker.stop();
   environmentReaper.stop();
   browserSessions.stopIdleReaper();
   server.close();

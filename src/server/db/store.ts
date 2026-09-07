@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, ne } from "drizzle-orm";
 import type { MessageView, SessionEvent } from "../../shared/contracts.js";
 import { asThinkingLevel, defaultThinkingLevelFor, type ThinkingLevel } from "../../shared/models.js";
@@ -340,10 +339,12 @@ export async function createUserMessageAndRun(input: {
       .values({
         sessionId: input.sessionId,
         userMessageId: message.id,
+        status: "running",
         model: input.model ?? session.defaultModel,
         thinkingLevel: input.thinkingLevel ?? asThinkingLevel(session.defaultThinkingLevel),
         maxCostUsd: config.RUN_MAX_COST_USD,
         maxTurns: config.RUN_MAX_TURNS,
+        startedAt: new Date(),
       })
       .returning();
 
@@ -578,44 +579,6 @@ export async function listEvents(sessionId: string, after = 0, limit = 500): Pro
   }));
 }
 
-export async function claimPendingRun(workerId: string) {
-  const [claimed] = await sql<
-    Array<{
-      id: string;
-      session_id: string;
-      user_message_id: string;
-      model: string;
-      thinking_level: string;
-      max_cost_usd: number;
-      max_turns: number;
-    }>
-  >`
-    UPDATE runs
-    SET status = 'running',
-        worker_id = ${workerId},
-        lease_expires_at = NOW() + INTERVAL '5 minutes',
-        started_at = COALESCE(started_at, NOW()),
-        updated_at = NOW()
-    WHERE id = (
-      SELECT id
-      FROM runs
-      WHERE status = 'pending'
-      ORDER BY created_at
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    RETURNING id, session_id, user_message_id, model, thinking_level, max_cost_usd, max_turns
-  `;
-  return claimed;
-}
-
-export async function renewRunLease(runId: string, workerId: string) {
-  await db
-    .update(runs)
-    .set({ leaseExpiresAt: new Date(Date.now() + 5 * 60_000), updatedAt: new Date() })
-    .where(and(eq(runs.id, runId), eq(runs.workerId, workerId)));
-}
-
 export async function recoverStaleRuns() {
   const interrupted = await db
     .select()
@@ -624,80 +587,14 @@ export async function recoverStaleRuns() {
 
   for (const run of interrupted) {
     if (run.status === "cancelling") {
-      await finishRun({ runId: run.id, status: "cancelled", error: "Cancelled before the worker restarted" });
-      continue;
+      await finishRun({ runId: run.id, status: "cancelled", error: "Cancelled before the server restarted" });
+    } else {
+      await db
+        .update(toolExecutions)
+        .set({ status: "failed", completedAt: new Date(), result: { error: "Server restarted" } })
+        .where(and(eq(toolExecutions.runId, run.id), eq(toolExecutions.status, "running")));
+      await finishRun({ runId: run.id, status: "failed", error: "Server restarted while this run was active" });
     }
-
-    const [session] = await db
-      .select()
-      .from(chatSessions)
-      .where(eq(chatSessions.id, run.sessionId))
-      .limit(1);
-    const leaf = session?.currentLeafMessageId
-      ? (await db.select().from(messages).where(eq(messages.id, session.currentLeafMessageId)).limit(1))[0]
-      : undefined;
-
-    let assistantHadNoTools = false;
-    if (leaf?.role === "assistant") {
-      const calls = await db
-        .select()
-        .from(messageBlocks)
-        .where(and(eq(messageBlocks.messageId, leaf.id), eq(messageBlocks.type, "tool_call")))
-        .orderBy(asc(messageBlocks.position));
-      assistantHadNoTools = calls.length === 0;
-      let parentMessageId: string | null = leaf.id;
-      for (const call of calls) {
-        const recovered = await createAgentMessage({
-          sessionId: run.sessionId,
-          runId: run.id,
-          parentMessageId,
-          role: "tool",
-          blocks: [
-            {
-              type: "tool_result",
-              text: "The worker restarted before this tool completed. Inspect the workspace and retry safely if needed.",
-              data: {
-                callId: String(call.data.callId ?? call.id),
-                toolName: String(call.data.name ?? "unknown"),
-                isError: true,
-              },
-              visibility: "model",
-            },
-          ],
-        });
-        parentMessageId = recovered.id;
-      }
-    }
-
-    const [updatedSession] = await db
-      .select()
-      .from(chatSessions)
-      .where(eq(chatSessions.id, run.sessionId))
-      .limit(1);
-    const queuedMessages = await db
-      .select()
-      .from(messages)
-      .where(and(eq(messages.runId, run.id), eq(messages.status, "queued")))
-      .orderBy(asc(messages.createdAt));
-    let queuedParent = updatedSession?.currentLeafMessageId ?? null;
-    for (const queued of queuedMessages) {
-      const activated = await activateQueuedMessage({ messageId: queued.id, parentMessageId: queuedParent });
-      queuedParent = activated.id;
-    }
-
-    if (assistantHadNoTools && queuedMessages.length === 0) {
-      await finishRun({ runId: run.id, status: "completed" });
-      continue;
-    }
-
-    await db
-      .update(toolExecutions)
-      .set({ status: "failed", completedAt: new Date(), result: { error: "Worker restarted" } })
-      .where(and(eq(toolExecutions.runId, run.id), eq(toolExecutions.status, "running")));
-    await db
-      .update(runs)
-      .set({ status: "pending", workerId: null, leaseExpiresAt: null, updatedAt: new Date() })
-      .where(eq(runs.id, run.id));
   }
 }
 
@@ -912,6 +809,3 @@ export async function listArtifactsForUser(sessionId: string, userId: string) {
     .then((rows) => rows.map((row) => row.artifact));
 }
 
-export function newWorkerId(): string {
-  return `worker-${process.pid}-${randomUUID().slice(0, 8)}`;
-}

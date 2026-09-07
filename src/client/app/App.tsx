@@ -1168,6 +1168,7 @@ function Console({
             </div>
 
             <Composer
+              sessionId={detail.session.id}
               working={Boolean(activeRun)}
               model={detail.session.defaultModel}
               // Resolved, not raw: a stored level the model no longer accepts is what the
@@ -1482,6 +1483,7 @@ function ModelSelect({
 }
 
 function Composer({
+  sessionId,
   working,
   model,
   thinkingLevel,
@@ -1489,6 +1491,7 @@ function Composer({
   onSend,
   onCancel,
 }: {
+  sessionId: string;
   working: boolean;
   model: string;
   thinkingLevel: ThinkingLevel;
@@ -1499,10 +1502,26 @@ function Composer({
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const warmSent = useRef(false);
+  const warmTimer = useRef<number>(0);
   const draft = text.trim();
   // One control: stop while a run is in flight, but typing turns it back into send so
   // guidance can still go out mid-run.
   const stopping = working && Boolean(onCancel) && !draft;
+
+  useEffect(() => {
+    warmSent.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!draft || warmSent.current) return;
+    clearTimeout(warmTimer.current);
+    warmTimer.current = window.setTimeout(() => {
+      warmSent.current = true;
+      api(`/api/sessions/${sessionId}/warm`, { method: "POST" }).catch(() => {});
+    }, 300);
+    return () => clearTimeout(warmTimer.current);
+  }, [text, sessionId]);
 
   useLayoutEffect(() => {
     const input = inputRef.current;

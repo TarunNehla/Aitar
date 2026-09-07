@@ -10,7 +10,6 @@ import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { config } from "../../config.js";
 import {
   activateQueuedMessage,
-  claimPendingRun,
   createAgentMessage,
   createContextSnapshot,
   finishRun,
@@ -18,13 +17,11 @@ import {
   getActiveBranchMessages,
   getSession,
   listContextSnapshots,
-  newWorkerId,
-  recoverStaleRuns,
-  renewRunLease,
   saveCheckpoint,
   startToolExecution,
   updateSessionEnvironment,
   updateSessionHead,
+  type SessionRelation,
 } from "../../db/store.js";
 import type { MessageView } from "../../../shared/contracts.js";
 import { asThinkingLevel, resolveThinkingLevel } from "../../../shared/models.js";
@@ -47,7 +44,8 @@ import { createRunVisionRouter, recoverFromUnsupportedImage } from "../model/vis
 import { workspaceManager } from "../workspace/workspace-manager.js";
 import { persistedToolSummary, safeToolArguments } from "../output-policy.js";
 
-/** Tools whose calls are worth replaying after a reload, so they reach Postgres as summaries. */
+const runnerLogger = logger.child({ component: "agent-runner" });
+
 const durableTools = new Set([
   "bash",
   "write",
@@ -115,7 +113,6 @@ interface ChatEnvironment {
   publishedBranch: string | null;
 }
 
-/** Regenerated at compaction time, because a summary must never carry stale repository state. */
 function environmentDescription(session: ChatEnvironment, repositoryName: string): string {
   return [
     `Repository: ${repositoryName}`,
@@ -130,14 +127,14 @@ function environmentDescription(session: ChatEnvironment, repositoryName: string
 const models = createModels();
 models.setProvider(openrouterProvider());
 
-interface ClaimedRun {
+export interface RunInput {
   id: string;
-  session_id: string;
-  user_message_id: string;
+  sessionId: string;
+  userMessageId: string;
   model: string;
-  thinking_level: string;
-  max_cost_usd: number;
-  max_turns: number;
+  thinkingLevel: string;
+  maxCostUsd: number;
+  maxTurns: number;
 }
 
 function modelFor(id: string): Model<any> {
@@ -291,322 +288,271 @@ class ActiveRuns {
 
 export const activeRuns = new ActiveRuns();
 
-export class AgentWorker {
-  private readonly workerId = newWorkerId();
-  private readonly log = logger.child({ component: "agent-worker", workerId: this.workerId });
-  private active = 0;
-  private timer: NodeJS.Timeout | null = null;
-  private stopped = false;
-  private ticking = false;
+export async function executeRun(run: RunInput, relation: SessionRelation): Promise<void> {
+  const startedAt = Date.now();
+  const runLog = runnerLogger.child({
+    runId: run.id,
+    sessionId: run.sessionId,
+    repositoryId: relation.repository.id,
+    model: run.model,
+  });
+  runLog.info(
+    {
+      maxTurns: run.maxTurns,
+      maxCostUsd: run.maxCostUsd,
+      providerRouting: configuredProviderPreferences(),
+    },
+    "Agent run started",
+  );
 
-  async start(): Promise<void> {
-    this.log.info("Agent worker recovery started");
-    await recoverStaleRuns();
-    this.log.info("Agent worker recovery completed");
-    this.timer = setInterval(() => this.scheduleTick(), 500);
-    await this.tick();
-  }
+  const writer = new EventWriter(run.sessionId, run.id);
+  const cost = new RunCostAccount(run.maxCostUsd);
+  let turns = 0;
+  let parentMessageId = relation.session.currentLeafMessageId;
+  let repositoryPath = "";
 
-  stop(): void {
-    this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.log.info({ activeRuns: this.active }, "Agent worker stopped");
-  }
-
-  private scheduleTick(): void {
-    void this.tick().catch((error) => {
-      this.log.error({ error: errorForLog(error) }, "Agent worker polling failed");
-    });
-  }
-
-  private async tick(): Promise<void> {
-    if (this.stopped || this.ticking || this.active >= config.MAX_ACTIVE_RUNS) return;
-    this.ticking = true;
-    try {
-      const claimed = await claimPendingRun(this.workerId);
-      if (!claimed) return;
-      this.log.info({ runId: claimed.id, sessionId: claimed.session_id }, "Agent run claimed");
-      this.active += 1;
-      void this.execute(claimed)
-        .catch((error) => {
-          this.log.error(
-            { error: errorForLog(error), runId: claimed.id, sessionId: claimed.session_id },
-            "Agent run failed unexpectedly",
-          );
-        })
-        .finally(() => {
-          this.active -= 1;
-          this.scheduleTick();
-        });
-    } finally {
-      this.ticking = false;
-    }
-  }
-
-  private async execute(run: ClaimedRun): Promise<void> {
-    const startedAt = Date.now();
-    const relation = await getSession(run.session_id);
-    if (!relation) {
-      await finishRun({ runId: run.id, status: "failed", error: "Session not found" });
-      return;
-    }
-
-    const runLog = this.log.child({
-      runId: run.id,
-      sessionId: run.session_id,
+  const checkpoint = async () => {
+    if (!repositoryPath) return null;
+    const current = await getSession(relation.session.id);
+    const runBaseCommit = current?.session.headCommit ?? current?.session.baseCommit;
+    if (!runBaseCommit) return null;
+    const result = await workspaceManager.checkpoint({
+      chatId: relation.session.id,
       repositoryId: relation.repository.id,
+      repositoryPath,
+      runId: run.id,
+      baseCommit: runBaseCommit,
+    });
+    if (!result.createdCommit) return null;
+    await saveCheckpoint({
+      sessionId: relation.session.id,
+      runId: run.id,
+      baseCommit: runBaseCommit,
+      checkpointCommit: result.checkpointCommit,
+      internalRef: result.internalRef,
+    });
+    await updateSessionHead(relation.session.id, result.checkpointCommit);
+    await writer.emit("checkpoint_saved", {
+      commit: result.checkpointCommit,
+      createdCommit: true,
+      changedFileCount: result.changedFiles.length,
+    });
+    return result;
+  };
+
+  try {
+    if (!config.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not configured");
+
+    await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "starting" });
+    const checkout = await withRepositoryGitAccess({ repository: relation.repository }, (gitEnvironment) =>
+      workspaceManager.ensureChatCheckout({
+        chatId: relation.session.id,
+        repositoryId: relation.repository.id,
+        repositoryUrl: relation.repository.repositoryUrl,
+        baseBranch: relation.session.baseBranch,
+        baseCommit: relation.session.baseCommit,
+        headCommit: relation.session.headCommit,
+        gitEnvironment,
+      }),
+    );
+    repositoryPath = checkout.repository;
+    await updateSessionEnvironment({
+      sessionId: relation.session.id,
+      envStatus: "ready",
+      baseCommit: checkout.baseCommit,
+      headCommit: checkout.headCommit,
+    });
+
+    const capability = await modelCapabilities.capabilityOf(run.model);
+    const contextWindow = await resolveContextWindow(run.model);
+    const thinkingLevel = resolveThinkingLevel(run.model, asThinkingLevel(run.thinkingLevel));
+    await writer.emit("run_started", {
       model: run.model,
+      thinkingLevel,
+      imageInput: capability.supportsImages,
+      capabilitySource: capability.source,
+      visionRoutingMode: config.VISION_ROUTING_MODE,
+      contextWindow: contextWindow.tokens,
+      contextWindowSource: contextWindow.source,
     });
     runLog.info(
       {
-        maxTurns: run.max_turns,
-        maxCostUsd: run.max_cost_usd,
-        providerRouting: configuredProviderPreferences(),
-      },
-      "Agent run started",
-    );
-
-    const writer = new EventWriter(run.session_id, run.id);
-    const cost = new RunCostAccount(run.max_cost_usd);
-    let turns = 0;
-    let parentMessageId = relation.session.currentLeafMessageId;
-    let repositoryPath = "";
-
-    const checkpoint = async () => {
-      if (!repositoryPath) return null;
-      // Re-read the head: switch_base_branch can move it while the run is working.
-      const current = await getSession(relation.session.id);
-      const runBaseCommit = current?.session.headCommit ?? current?.session.baseCommit;
-      if (!runBaseCommit) return null;
-      const result = await workspaceManager.checkpoint({
-        chatId: relation.session.id,
-        repositoryId: relation.repository.id,
-        repositoryPath,
-        runId: run.id,
-        baseCommit: runBaseCommit,
-      });
-      if (!result.createdCommit) return null;
-      await saveCheckpoint({
-        sessionId: relation.session.id,
-        runId: run.id,
-        baseCommit: runBaseCommit,
-        checkpointCommit: result.checkpointCommit,
-        internalRef: result.internalRef,
-      });
-      await updateSessionHead(relation.session.id, result.checkpointCommit);
-      await writer.emit("checkpoint_saved", {
-        commit: result.checkpointCommit,
-        createdCommit: true,
-        changedFileCount: result.changedFiles.length,
-      });
-      return result;
-    };
-
-    try {
-      if (!config.OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY is not configured");
-
-      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "starting" });
-      const checkout = await withRepositoryGitAccess({ repository: relation.repository }, (gitEnvironment) =>
-        workspaceManager.ensureChatCheckout({
-          chatId: relation.session.id,
-          repositoryId: relation.repository.id,
-          repositoryUrl: relation.repository.repositoryUrl,
-          baseBranch: relation.session.baseBranch,
-          baseCommit: relation.session.baseCommit,
-          headCommit: relation.session.headCommit,
-          gitEnvironment,
-        }),
-      );
-      repositoryPath = checkout.repository;
-      await updateSessionEnvironment({
-        sessionId: relation.session.id,
-        envStatus: "ready",
-        baseCommit: checkout.baseCommit,
-        headCommit: checkout.headCommit,
-      });
-
-      const capability = await modelCapabilities.capabilityOf(run.model);
-      const contextWindow = await resolveContextWindow(run.model);
-      const thinkingLevel = resolveThinkingLevel(run.model, asThinkingLevel(run.thinking_level));
-      await writer.emit("run_started", {
-        model: run.model,
-        thinkingLevel,
-        workerId: this.workerId,
         imageInput: capability.supportsImages,
         capabilitySource: capability.source,
-        visionRoutingMode: config.VISION_ROUTING_MODE,
         contextWindow: contextWindow.tokens,
         contextWindowSource: contextWindow.source,
-      });
-      runLog.info(
-        {
-          imageInput: capability.supportsImages,
-          capabilitySource: capability.source,
-          contextWindow: contextWindow.tokens,
-          contextWindowSource: contextWindow.source,
-        },
-        "Model capabilities resolved",
-      );
+      },
+      "Model capabilities resolved",
+    );
 
-      const branch = await getActiveBranchMessages(run.session_id);
-      const history: AgentMessage[] = [];
-      const historyIds: Array<[AgentMessage, string]> = [];
-      for (const view of branch) {
-        const message = toPiMessage(view);
-        if (!message) continue;
-        history.push(message);
-        historyIds.push([message, view.id]);
-      }
-      const model: Model<any> = {
-        ...modelFor(run.model),
-        input: capability.supportsImages ? ["text", "image"] : ["text"],
-      };
-      const vision = createRunVisionRouter({
-        primaryModelId: capability.modelId || run.model,
-        supportsImages: capability.supportsImages,
-        cost,
-        complete: models.completeSimple.bind(models),
+    const branch = await getActiveBranchMessages(run.sessionId);
+    const history: AgentMessage[] = [];
+    const historyIds: Array<[AgentMessage, string]> = [];
+    for (const view of branch) {
+      const message = toPiMessage(view);
+      if (!message) continue;
+      history.push(message);
+      historyIds.push([message, view.id]);
+    }
+    const model: Model<any> = {
+      ...modelFor(run.model),
+      input: capability.supportsImages ? ["text", "image"] : ["text"],
+    };
+    const vision = createRunVisionRouter({
+      primaryModelId: capability.modelId || run.model,
+      supportsImages: capability.supportsImages,
+      cost,
+      complete: models.completeSimple.bind(models),
+      apiKey: () => config.OPENROUTER_API_KEY,
+      onPayload: applyProviderRouting,
+    });
+    const tools = createAgentTools({
+      chatId: relation.session.id,
+      repositoryPath,
+      sessionId: run.sessionId,
+      runId: run.id,
+      writer,
+      vision,
+    });
+
+    const compactor = new ContextCompactor({
+      model: run.model,
+      contextWindow: contextWindow.tokens,
+      thresholdPercent: config.CONTEXT_COMPACTION_THRESHOLD_PERCENT,
+      hardTokenLimit: config.CONTEXT_COMPACTION_HARD_TOKEN_LIMIT,
+      keepRecentTokens: config.CONTEXT_COMPACTION_KEEP_RECENT_TOKENS,
+      systemPrompt: () => systemPrompt,
+      tools: () => tools,
+      environment: async () => {
+        const current = await getSession(relation.session.id);
+        return environmentDescription(current?.session ?? relation.session, relation.repository.name);
+      },
+      summarise: createSummariser({
+        models,
+        model,
         apiKey: () => config.OPENROUTER_API_KEY,
         onPayload: applyProviderRouting,
-      });
-      const tools = createAgentTools({
-        chatId: relation.session.id,
-        repositoryPath,
-        sessionId: run.session_id,
-        runId: run.id,
-        writer,
-        vision,
-      });
-
-      const compactor = new ContextCompactor({
-        model: run.model,
-        contextWindow: contextWindow.tokens,
-        thresholdPercent: config.CONTEXT_COMPACTION_THRESHOLD_PERCENT,
-        hardTokenLimit: config.CONTEXT_COMPACTION_HARD_TOKEN_LIMIT,
-        keepRecentTokens: config.CONTEXT_COMPACTION_KEEP_RECENT_TOKENS,
-        systemPrompt: () => systemPrompt,
-        tools: () => tools,
-        environment: async () => {
-          const current = await getSession(relation.session.id);
-          return environmentDescription(current?.session ?? relation.session, relation.repository.name);
-        },
-        summarise: createSummariser({
-          models,
-          model,
-          apiKey: () => config.OPENROUTER_API_KEY,
-          onPayload: applyProviderRouting,
-        }),
-        saveSnapshot: async (record) => {
-          const snapshot = await createContextSnapshot({
-            sessionId: run.session_id,
-            throughMessageId: record.throughMessageId,
-            firstPreservedMessageId: record.firstPreservedMessageId,
-            previousSnapshotId: record.previousSnapshotId,
-            summary: record.summary,
-            model: record.model,
-            reason: record.reason,
-            promptVersion: record.promptVersion,
-            tokensBefore: record.tokensBefore,
-            tokensAfter: record.tokensAfter,
-            inputTokens: record.usage.input,
-            outputTokens: record.usage.output,
-            costUsd: record.usage.cost.total,
-          });
-          return { id: snapshot.id };
-        },
-        emit: (type, payload) => writer.emit(type, payload),
-        onUsage: (usage) => cost.addCompactionUsage(usage),
-        snapshot: snapshotForBranch(
-          await listContextSnapshots(run.session_id),
-          branch.map((message) => message.id),
-        ),
-      });
-      for (const [message, messageId] of historyIds) compactor.register(message, messageId);
-
-      const agent = new Agent({
-        initialState: {
-          systemPrompt,
-          model,
-          thinkingLevel,
-          tools,
-          messages: history,
-        },
-        streamFn: models.streamSimple.bind(models),
-        convertToLlm,
-        transformContext: (messages, signal) => compactor.transformContext(messages, signal),
-        onPayload: applyProviderRouting,
-        getApiKey: () => config.OPENROUTER_API_KEY,
-        sessionId: run.session_id,
-        toolExecution: "sequential",
-      });
-
-      activeRuns.set(run.id, agent);
-      const toolArgumentsByCall = new Map<string, Record<string, unknown>>();
-      agent.subscribe(async (event) => {
-        await this.handleAgentEvent({
-          event,
-          run,
-          writer,
-          toolArgumentsByCall,
-          getParent: () => parentMessageId,
-          setParent: (id) => (parentMessageId = id),
-          register: (message, messageId) => compactor.register(message, messageId),
+      }),
+      saveSnapshot: async (record) => {
+        const snapshot = await createContextSnapshot({
+          sessionId: run.sessionId,
+          throughMessageId: record.throughMessageId,
+          firstPreservedMessageId: record.firstPreservedMessageId,
+          previousSnapshotId: record.previousSnapshotId,
+          summary: record.summary,
+          model: record.model,
+          reason: record.reason,
+          promptVersion: record.promptVersion,
+          tokensBefore: record.tokensBefore,
+          tokensAfter: record.tokensAfter,
+          inputTokens: record.usage.input,
+          outputTokens: record.usage.output,
+          costUsd: record.usage.cost.total,
         });
+        return { id: snapshot.id };
+      },
+      emit: (type, payload) => writer.emit(type, payload),
+      onUsage: (usage) => cost.addCompactionUsage(usage),
+      snapshot: snapshotForBranch(
+        await listContextSnapshots(run.sessionId),
+        branch.map((message) => message.id),
+      ),
+    });
+    for (const [message, messageId] of historyIds) compactor.register(message, messageId);
 
-        if (event.type === "turn_start") {
-          turns += 1;
-          await renewRunLease(run.id, this.workerId);
-          if (turns > run.max_turns) agent.abort();
-        }
+    const agent = new Agent({
+      initialState: {
+        systemPrompt,
+        model,
+        thinkingLevel,
+        tools,
+        messages: history,
+      },
+      streamFn: models.streamSimple.bind(models),
+      convertToLlm,
+      transformContext: (messages, signal) => compactor.transformContext(messages, signal),
+      onPayload: applyProviderRouting,
+      getApiKey: () => config.OPENROUTER_API_KEY,
+      sessionId: run.sessionId,
+      toolExecution: "sequential",
+    });
 
-        if (event.type === "message_end" && event.message.role === "assistant") {
-          cost.addModelUsage(event.message.usage);
-          compactor.recordUsage(event.message);
-          if (cost.exceededBudget()) agent.abort();
-        }
+    activeRuns.set(run.id, agent);
+    const toolArgumentsByCall = new Map<string, Record<string, unknown>>();
+    agent.subscribe(async (event) => {
+      await handleAgentEvent({
+        event,
+        run,
+        writer,
+        toolArgumentsByCall,
+        getParent: () => parentMessageId,
+        setParent: (id) => (parentMessageId = id),
+        register: (message, messageId) => compactor.register(message, messageId),
       });
 
+      if (event.type === "turn_start") {
+        turns += 1;
+        if (turns > run.maxTurns) agent.abort();
+      }
+
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        cost.addModelUsage(event.message.usage);
+        compactor.recordUsage(event.message);
+        if (cost.exceededBudget()) agent.abort();
+      }
+    });
+
+    await agent.continue();
+    await writer.drain();
+
+    const overflowRetry = prepareOverflowRetry({
+      errorMessage: agent.state.errorMessage,
+      messages: agent.state.messages,
+    });
+    if (overflowRetry) {
+      runLog.warn({ error: agent.state.errorMessage }, "Context overflow reported; compacting and retrying once");
+      compactor.requestCompaction("context_overflow");
+      agent.state.messages = overflowRetry;
       await agent.continue();
       await writer.drain();
+    }
+    if (isContextOverflowError(agent.state.errorMessage)) {
+      throw new Error(
+        `The request still exceeds the model context window after compaction: ${agent.state.errorMessage}`,
+      );
+    }
+    const demoted = await recoverFromUnsupportedImage({
+      errorMessage: agent.state.errorMessage,
+      vision,
+      chatId: relation.session.id,
+      emit: (type, payload) => writer.emit(type, payload),
+      steer: (text) => agent.steer({ role: "user", content: text, timestamp: Date.now() }),
+    });
+    if (demoted) {
+      model.input.splice(0, model.input.length, "text");
+      await agent.continue();
+      await writer.drain();
+    }
+    if (agent.state.errorMessage && !agent.state.errorMessage.toLowerCase().includes("abort")) {
+      throw new Error(agent.state.errorMessage);
+    }
+    await checkpoint();
 
-      const overflowRetry = prepareOverflowRetry({
-        errorMessage: agent.state.errorMessage,
-        messages: agent.state.messages,
-      });
-      if (overflowRetry) {
-        runLog.warn({ error: agent.state.errorMessage }, "Context overflow reported; compacting and retrying once");
-        compactor.requestCompaction("context_overflow");
-        agent.state.messages = overflowRetry;
-        await agent.continue();
-        await writer.drain();
-      }
-      if (isContextOverflowError(agent.state.errorMessage)) {
-        throw new Error(
-          `The request still exceeds the model context window after compaction: ${agent.state.errorMessage}`,
-        );
-      }
-      const demoted = await recoverFromUnsupportedImage({
-        errorMessage: agent.state.errorMessage,
-        vision,
-        chatId: relation.session.id,
-        emit: (type, payload) => writer.emit(type, payload),
-        steer: (text) => agent.steer({ role: "user", content: text, timestamp: Date.now() }),
-      });
-      if (demoted) {
-        model.input.splice(0, model.input.length, "text");
-        await agent.continue();
-        await writer.drain();
-      }
-      if (agent.state.errorMessage && !agent.state.errorMessage.toLowerCase().includes("abort")) {
-        throw new Error(agent.state.errorMessage);
-      }
-      await checkpoint();
-
-      const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
-      const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
-      await finishRun({ runId: run.id, status, ...usage });
-      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
-      await writer.emit("run_completed", {
+    const status = agent.state.errorMessage?.toLowerCase().includes("abort") ? "cancelled" : "completed";
+    const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
+    await finishRun({ runId: run.id, status, ...usage });
+    await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: "ready" });
+    await writer.emit("run_completed", {
+      status,
+      ...usage,
+      visionCostUsd,
+      visionRequests,
+      compactionCostUsd,
+      compactions,
+      turns,
+    });
+    runLog.info(
+      {
         status,
         ...usage,
         visionCostUsd,
@@ -614,171 +560,158 @@ export class AgentWorker {
         compactionCostUsd,
         compactions,
         turns,
-      });
-      runLog.info(
-        {
-          status,
-          ...usage,
-          visionCostUsd,
-          visionRequests,
-          compactionCostUsd,
-          compactions,
-          turns,
-          durationMs: Date.now() - startedAt,
-        },
-        "Agent run finished",
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
-      runLog.error(
-        {
-          error: errorForLog(error),
-          ...usage,
-          visionCostUsd,
-          visionRequests,
-          compactionCostUsd,
-          compactions,
-          turns,
-          durationMs: Date.now() - startedAt,
-        },
-        "Agent run failed",
-      );
-      try {
-        await checkpoint();
-      } catch {
-        // Preserve the original run error.
-      }
-      await finishRun({ runId: run.id, status: "failed", ...usage, error: message });
-      await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: repositoryPath ? "ready" : "failed" });
-      await writer.emit("run_failed", { error: message });
-    } finally {
-      activeRuns.delete(run.id);
-      await writer.drain();
+        durationMs: Date.now() - startedAt,
+      },
+      "Agent run finished",
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const { visionCostUsd, visionRequests, compactionCostUsd, compactions, ...usage } = cost.totals();
+    runLog.error(
+      {
+        error: errorForLog(error),
+        ...usage,
+        visionCostUsd,
+        visionRequests,
+        compactionCostUsd,
+        compactions,
+        turns,
+        durationMs: Date.now() - startedAt,
+      },
+      "Agent run failed",
+    );
+    try {
+      await checkpoint();
+    } catch {
+      // Preserve the original run error.
     }
-  }
-
-  private async handleAgentEvent(input: {
-    event: AgentEvent;
-    run: ClaimedRun;
-    writer: EventWriter;
-    toolArgumentsByCall: Map<string, Record<string, unknown>>;
-    getParent: () => string | null;
-    setParent: (id: string) => void;
-    register: (message: AgentMessage, messageId: string) => void;
-  }): Promise<void> {
-    const { event, run, writer } = input;
-    if (event.type === "message_update") {
-      const update = event.assistantMessageEvent;
-      if (update.type === "text_delta") writer.delta("assistant_text_delta", "delta", update.delta);
-      if (update.type === "thinking_start") await writer.emit("reasoning_started");
-      if (update.type === "thinking_end") await writer.emit("reasoning_completed");
-      return;
-    }
-
-    if (event.type === "message_start" && event.message.role === "user") {
-      const queuedMessageId = activeRuns.shiftQueuedMessage(run.id);
-      if (queuedMessageId) {
-        const stored = await activateQueuedMessage({
-          messageId: queuedMessageId,
-          parentMessageId: input.getParent(),
-        });
-        input.setParent(stored.id);
-        input.register(event.message, stored.id);
-        await writer.emit("user_message_accepted", { messageId: stored.id });
-      }
-      return;
-    }
-
-    if (event.type === "message_end" && event.message.role === "assistant") {
-      await writer.drain();
-      const stored = await createAgentMessage({
-        sessionId: run.session_id,
-        runId: run.id,
-        parentMessageId: input.getParent(),
-        role: "assistant",
-        model: event.message.model,
-        stopReason: event.message.stopReason,
-        blocks: assistantBlocks(event.message),
-      });
-      input.setParent(stored.id);
-      input.register(event.message, stored.id);
-      await writer.emit("assistant_message_completed", { messageId: stored.id, stopReason: event.message.stopReason });
-      return;
-    }
-
-    if (event.type === "message_end" && event.message.role === "toolResult") {
-      const toolArguments = input.toolArgumentsByCall.get(event.message.toolCallId);
-      const stored = await createAgentMessage({
-        sessionId: run.session_id,
-        runId: run.id,
-        parentMessageId: input.getParent(),
-        role: "tool",
-        blocks: toolBlocks(event.message, toolArguments),
-      });
-      input.toolArgumentsByCall.delete(event.message.toolCallId);
-      input.setParent(stored.id);
-      input.register(event.message, stored.id);
-      return;
-    }
-
-    if (event.type === "tool_execution_start") {
-      this.log.info(
-        { runId: run.id, sessionId: run.session_id, toolCallId: event.toolCallId, toolName: event.toolName },
-        "Agent tool started",
-      );
-      const durable = durableTools.has(event.toolName);
-      const safeArguments = safeToolArguments(event.toolName, event.args);
-      input.toolArgumentsByCall.set(event.toolCallId, safeArguments);
-      if (durable) await startToolExecution({
-        runId: run.id,
-        callId: event.toolCallId,
-        toolName: event.toolName,
-        arguments: safeArguments,
-      });
-      const payload = {
-        callId: event.toolCallId,
-        toolName: event.toolName,
-        arguments: safeArguments,
-      };
-      if (durable) await writer.emit("tool_started", payload);
-      else writer.live("tool_started", payload);
-      return;
-    }
-
-    if (event.type === "tool_execution_end") {
-      const durable = durableTools.has(event.toolName);
-      const summary = persistedToolSummary({
-        toolName: event.toolName,
-        isError: event.isError,
-        details: event.result?.details,
-        arguments: input.toolArgumentsByCall.get(event.toolCallId),
-      });
-      const toolLogData = {
-        runId: run.id,
-        sessionId: run.session_id,
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-      };
-      if (event.isError) this.log.warn(toolLogData, "Agent tool failed");
-      else this.log.info(toolLogData, "Agent tool completed");
-      if (durable) await finishToolExecution({
-        runId: run.id,
-        callId: event.toolCallId,
-        status: event.isError ? "failed" : "completed",
-        result: { summary: summary.text, ...summary.data },
-        exitCode: typeof summary.data.exitCode === "number" ? summary.data.exitCode : undefined,
-      });
-      const payload = {
-        callId: event.toolCallId,
-        toolName: event.toolName,
-        isError: event.isError,
-        summary: summary.text,
-      };
-      if (durable) await writer.emit("tool_completed", payload);
-      else writer.live("tool_completed", payload);
-    }
+    await finishRun({ runId: run.id, status: "failed", ...usage, error: message });
+    await updateSessionEnvironment({ sessionId: relation.session.id, envStatus: repositoryPath ? "ready" : "failed" });
+    await writer.emit("run_failed", { error: message });
+  } finally {
+    activeRuns.delete(run.id);
+    await writer.drain();
   }
 }
 
-export const agentWorker = new AgentWorker();
+async function handleAgentEvent(input: {
+  event: AgentEvent;
+  run: RunInput;
+  writer: EventWriter;
+  toolArgumentsByCall: Map<string, Record<string, unknown>>;
+  getParent: () => string | null;
+  setParent: (id: string) => void;
+  register: (message: AgentMessage, messageId: string) => void;
+}): Promise<void> {
+  const { event, run, writer } = input;
+  if (event.type === "message_update") {
+    const update = event.assistantMessageEvent;
+    if (update.type === "text_delta") writer.delta("assistant_text_delta", "delta", update.delta);
+    if (update.type === "thinking_start") await writer.emit("reasoning_started");
+    if (update.type === "thinking_end") await writer.emit("reasoning_completed");
+    return;
+  }
+
+  if (event.type === "message_start" && event.message.role === "user") {
+    const queuedMessageId = activeRuns.shiftQueuedMessage(run.id);
+    if (queuedMessageId) {
+      const stored = await activateQueuedMessage({
+        messageId: queuedMessageId,
+        parentMessageId: input.getParent(),
+      });
+      input.setParent(stored.id);
+      input.register(event.message, stored.id);
+      await writer.emit("user_message_accepted", { messageId: stored.id });
+    }
+    return;
+  }
+
+  if (event.type === "message_end" && event.message.role === "assistant") {
+    await writer.drain();
+    const stored = await createAgentMessage({
+      sessionId: run.sessionId,
+      runId: run.id,
+      parentMessageId: input.getParent(),
+      role: "assistant",
+      model: event.message.model,
+      stopReason: event.message.stopReason,
+      blocks: assistantBlocks(event.message),
+    });
+    input.setParent(stored.id);
+    input.register(event.message, stored.id);
+    await writer.emit("assistant_message_completed", { messageId: stored.id, stopReason: event.message.stopReason });
+    return;
+  }
+
+  if (event.type === "message_end" && event.message.role === "toolResult") {
+    const toolArguments = input.toolArgumentsByCall.get(event.message.toolCallId);
+    const stored = await createAgentMessage({
+      sessionId: run.sessionId,
+      runId: run.id,
+      parentMessageId: input.getParent(),
+      role: "tool",
+      blocks: toolBlocks(event.message, toolArguments),
+    });
+    input.toolArgumentsByCall.delete(event.message.toolCallId);
+    input.setParent(stored.id);
+    input.register(event.message, stored.id);
+    return;
+  }
+
+  if (event.type === "tool_execution_start") {
+    runnerLogger.info(
+      { runId: run.id, sessionId: run.sessionId, toolCallId: event.toolCallId, toolName: event.toolName },
+      "Agent tool started",
+    );
+    const durable = durableTools.has(event.toolName);
+    const safeArguments = safeToolArguments(event.toolName, event.args);
+    input.toolArgumentsByCall.set(event.toolCallId, safeArguments);
+    if (durable) await startToolExecution({
+      runId: run.id,
+      callId: event.toolCallId,
+      toolName: event.toolName,
+      arguments: safeArguments,
+    });
+    const payload = {
+      callId: event.toolCallId,
+      toolName: event.toolName,
+      arguments: safeArguments,
+    };
+    if (durable) await writer.emit("tool_started", payload);
+    else writer.live("tool_started", payload);
+    return;
+  }
+
+  if (event.type === "tool_execution_end") {
+    const durable = durableTools.has(event.toolName);
+    const summary = persistedToolSummary({
+      toolName: event.toolName,
+      isError: event.isError,
+      details: event.result?.details,
+      arguments: input.toolArgumentsByCall.get(event.toolCallId),
+    });
+    const toolLogData = {
+      runId: run.id,
+      sessionId: run.sessionId,
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+    };
+    if (event.isError) runnerLogger.warn(toolLogData, "Agent tool failed");
+    else runnerLogger.info(toolLogData, "Agent tool completed");
+    if (durable) await finishToolExecution({
+      runId: run.id,
+      callId: event.toolCallId,
+      status: event.isError ? "failed" : "completed",
+      result: { summary: summary.text, ...summary.data },
+      exitCode: typeof summary.data.exitCode === "number" ? summary.data.exitCode : undefined,
+    });
+    const payload = {
+      callId: event.toolCallId,
+      toolName: event.toolName,
+      isError: event.isError,
+      summary: summary.text,
+    };
+    if (durable) await writer.emit("tool_completed", payload);
+    else writer.live("tool_completed", payload);
+  }
+}

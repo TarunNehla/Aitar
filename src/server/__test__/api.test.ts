@@ -220,11 +220,11 @@ describe("chat creation", () => {
     expect(Object.keys(createdSessions[0])).not.toContain("publishedBranch");
   });
 
-  it("prepares no checkout and starts no container for a new chat", async () => {
+  it("eagerly warms checkout and container for a new chat", async () => {
     await createChat();
 
-    expect(ensureChatCheckout).not.toHaveBeenCalled();
-    expect(ensureContainer).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(ensureChatCheckout).toHaveBeenCalled());
+    await vi.waitFor(() => expect(ensureContainer).toHaveBeenCalled());
   });
 
   it("ignores a base branch the browser tries to choose", async () => {

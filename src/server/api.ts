@@ -57,7 +57,8 @@ import {
   type SessionRelation,
 } from "./db/store.js";
 import { eventHub } from "./events/event-hub.js";
-import { activeRuns } from "./runtime/agent/agent-runner.js";
+import { activeRuns, executeRun, type RunInput } from "./runtime/agent/agent-runner.js";
+import { containerPool, warmSession } from "./runtime/container-pool.js";
 import { validateRepositoryUrl, workspaceManager } from "./runtime/workspace/workspace-manager.js";
 import {
   defaultThinkingLevelFor,
@@ -398,7 +399,6 @@ export function createApi() {
       const repository = await requireRepository(request, response);
       if (!repository) return;
 
-      // A new chat is a database row. Its checkout and container wait until the agent needs them.
       const session = await createSession({
         id: randomUUID(),
         repositoryId: repository.id,
@@ -407,6 +407,18 @@ export function createApi() {
         thinkingLevel: input.thinkingLevel,
         baseBranch: repository.defaultBranch,
       });
+
+      if (containerPool.acquire(session.id, session.id, repository.id)) {
+        void warmSession({
+          chatId: session.id,
+          sessionId: session.id,
+          repository,
+          baseBranch: repository.defaultBranch,
+          baseCommit: null,
+          headCommit: null,
+        }).catch(() => containerPool.release(session.id));
+      }
+
       response.status(201).json({ session: sessionView(session) });
     }),
   );
@@ -544,6 +556,37 @@ export function createApi() {
   );
 
   app.post(
+    "/api/sessions/:sessionId/warm",
+    asyncRoute(async (request, response) => {
+      const relation = await requireSession(request, response);
+      if (!relation) return;
+
+      const chatId = relation.session.id;
+      if (containerPool.get(chatId)) {
+        containerPool.touch(chatId);
+        response.json({ status: "ready" });
+        return;
+      }
+
+      if (!containerPool.acquire(chatId, relation.session.id, relation.repository.id)) {
+        response.json({ status: "unavailable" });
+        return;
+      }
+
+      void warmSession({
+        chatId,
+        sessionId: relation.session.id,
+        repository: relation.repository,
+        baseBranch: relation.session.baseBranch,
+        baseCommit: relation.session.baseCommit,
+        headCommit: relation.session.headCommit,
+      }).catch(() => containerPool.release(chatId));
+
+      response.status(202).json({ status: "warming" });
+    }),
+  );
+
+  app.post(
     "/api/sessions/:sessionId/messages",
     asyncRoute(async (request, response) => {
       const input = messageInput.parse(request.body);
@@ -569,6 +612,29 @@ export function createApi() {
       }
 
       const created = await createUserMessageAndRun({ sessionId, ...input });
+
+      if (!containerPool.get(sessionId)) {
+        if (!containerPool.acquire(sessionId, sessionId, relation.repository.id)) {
+          response.status(503).json({ error: "No container slots available. Try again shortly." });
+          return;
+        }
+      }
+      containerPool.markRunActive(sessionId);
+
+      const runInput: RunInput = {
+        id: created.run.id,
+        sessionId,
+        userMessageId: created.run.userMessageId,
+        model: created.run.model,
+        thinkingLevel: created.run.thinkingLevel,
+        maxCostUsd: created.run.maxCostUsd,
+        maxTurns: created.run.maxTurns,
+      };
+
+      void executeRun(runInput, relation).finally(() => {
+        containerPool.markRunIdle(sessionId);
+      });
+
       response.status(202).json(created);
     }),
   );
