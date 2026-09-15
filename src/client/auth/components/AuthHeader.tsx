@@ -13,7 +13,7 @@ export function AuthHeader({
   return (
     <header className="auth-header">
       <div className="brand">
-        <span className="brand-placeholder" />
+        <img className="brand-logo" src="/logo.png" alt="Aitar" />
         <strong>{brandName}</strong>
       </div>
       {icon && (

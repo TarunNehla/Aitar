@@ -966,9 +966,8 @@ function Console({
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        {/* No brand mark exists for this product — the name is set in plain type. */}
         <div className="brand">
-          <span className="brand-placeholder" />
+          <img className="brand-logo" src="/logo.png" alt="Aitar" />
           <strong>Aitar</strong>
         </div>
 

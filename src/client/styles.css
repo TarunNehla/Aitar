@@ -93,15 +93,12 @@ button:disabled { cursor: not-allowed; }
   border-right: 1px solid var(--border-hairline);
 }
 
-/* No brand mark exists for this product, so the name is set in plain type
-   beside a neutral placeholder square. See the design system readme. */
 .brand { display: flex; align-items: center; gap: var(--space-5); padding: 0 var(--space-4); }
-.brand-placeholder {
+.brand-logo {
   flex: none;
   width: 26px;
   height: 26px;
-  background: var(--surface-sunken);
-  border: 1px solid var(--border-hairline);
+  object-fit: contain;
   border-radius: var(--radius-sm);
 }
 .brand strong {
