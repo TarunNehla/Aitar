@@ -283,7 +283,8 @@ describe("authenticated application state", () => {
     authMethods = null;
     render(<App />);
 
-    expect(screen.getByText("Opening Aitar…")).toBeDefined();
+    expect(screen.getByText("Opening Aitar")).toBeDefined();
+    expect(document.querySelector('.loading-logo')?.getAttribute('src')).toBe('/logo.png');
     expect(screen.queryByLabelText("Password")).toBeNull();
   });
 
@@ -1016,6 +1017,27 @@ describe("branch information is gone from the interface", () => {
 });
 
 describe("streamed agent replies", () => {
+  it("shows the sent message and a stable starting state immediately", async () => {
+    let finishSend: ((value: unknown) => void) | null = null;
+    apiMock.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/messages")) return new Promise((resolve) => { finishSend = resolve; });
+      return respond(path, options);
+    });
+    await openConsole();
+    const composer = await openComposer();
+    const textarea = composer.querySelector("textarea") as HTMLTextAreaElement;
+
+    fireEvent.change(textarea, { target: { value: "Fix the navigation" } });
+    fireEvent.submit(composer);
+
+    await waitFor(() => expect(screen.getByText("Fix the navigation")).toBeDefined());
+    expect(screen.getByText("Starting…")).toBeDefined();
+    expect(document.querySelector(".user-message.pending")?.classList.contains("sending")).toBe(true);
+    expect(document.querySelector(".agent-starting img")?.getAttribute("src")).toBe("/logo.png");
+
+    act(() => finishSend?.({ message: { id: "message-sent" } }));
+  });
+
   it("keeps the reply on screen while the next tool call runs", async () => {
     sessionMessages = [userMessage("message-1", "Fix the header")];
     vi.stubGlobal("EventSource", RecordingEventSource);
@@ -1032,7 +1054,7 @@ describe("streamed agent replies", () => {
     // reaches the client with the next session fetch, which the tool call outruns.
     act(() => stream.emit(2, "assistant_message_completed", { messageId: "message-2" }));
     act(() => stream.emit(3, "tool_started", { callId: "call-1", toolName: "read" }));
-    await waitFor(() => expect(screen.getByText("Running")).toBeDefined());
+    await waitFor(() => expect(screen.getByText("Reading")).toBeDefined());
 
     expect(screen.getByText("Reading the header component.")).toBeDefined();
 
@@ -1046,6 +1068,110 @@ describe("streamed agent replies", () => {
     await waitFor(() => expect(screen.getByText("Read")).toBeDefined());
     expect(screen.getAllByText("Reading the header component.")).toHaveLength(1);
     expect(document.querySelector(".assistant-message.streaming")).toBeNull();
+  });
+
+  it("restores only the unfinished streamed reply after reconnecting", async () => {
+    sessionMessages = [
+      userMessage("message-1", "Fix the header"),
+      assistantMessage("message-2", "I inspected the header."),
+    ];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+
+    act(() => stream.emit(1, "assistant_text_delta", { delta: "I inspected the header." }));
+    act(() => stream.emit(2, "assistant_message_completed", { messageId: "message-2" }));
+    act(() => stream.emit(3, "assistant_text_delta", { delta: "Applying the fix now" }));
+    act(() => stream.ready());
+
+    await waitFor(() => expect(screen.getByText("Applying the fix now")).toBeDefined());
+    expect(screen.getAllByText("I inspected the header.")).toHaveLength(1);
+    expect(document.querySelectorAll(".assistant-message.streaming")).toHaveLength(1);
+  });
+
+  it("updates one tool row in place from active to completed", async () => {
+    sessionMessages = [userMessage("message-1", "Inspect the header")];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+
+    act(() => stream.emit(1, "tool_started", {
+      callId: "call-1",
+      toolName: "read",
+      arguments: { path: "/workspace/src/Header.tsx" },
+    }));
+    await waitFor(() => expect(screen.getByText("Reading")).toBeDefined());
+    const activeRow = screen.getByText("Reading").closest(".timeline-event");
+    expect(screen.getByText("src/Header.tsx")).toBeDefined();
+
+    act(() => stream.emit(2, "tool_completed", { callId: "call-1", toolName: "read", isError: false }));
+    await waitFor(() => expect(screen.getByText("Read")).toBeDefined());
+    const completedRow = screen.getByText("Read").closest(".timeline-event");
+    expect(completedRow).toBe(activeRow);
+    expect(document.querySelectorAll(".timeline-event")).toHaveLength(1);
+  });
+
+  it("creates exactly one completed activity summary for a run", async () => {
+    sessionMessages = [
+      userMessage("message-1", "Fix the header"),
+      toolMessage("call-1", "read", { path: "src/Header.tsx", lines: 12, bytes: 300 }),
+      assistantMessage("message-2", "I found the issue."),
+      toolMessage("call-2", "edit", { path: "src/Header.tsx", edits: 1 }),
+      assistantMessage("message-3", "The header is fixed."),
+    ];
+    sessionRuns = [{
+      id: "run-1",
+      userMessageId: "message-1",
+      status: "completed",
+      model: deepseekModel,
+      costUsd: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-01T00:00:12.000Z",
+    }];
+    await openConsole();
+
+    await waitFor(() => expect(screen.getByText(/^Worked for 12s/)).toBeDefined());
+    expect(screen.getAllByText(/^Worked for/)).toHaveLength(1);
+    expect(screen.getByText(/2 actions/)).toBeDefined();
+    expect(screen.getByText("The header is fixed.")).toBeDefined();
+  });
+
+  it("moves from finalizing to one completed summary", async () => {
+    sessionMessages = [userMessage("message-1", "Update the header")];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+
+    act(() => stream.emit(1, "run_started"));
+    act(() => stream.emit(2, "checkpoint_saved", {
+      commit: "abc123",
+      createdCommit: true,
+      changedFileCount: 1,
+    }));
+    await waitFor(() => expect(screen.getByText("Finalizing changes…")).toBeDefined());
+
+    act(() => stream.emit(3, "run_completed", { status: "completed" }));
+    await waitFor(() => expect(screen.getByText(/^Worked for/)).toBeDefined());
+    expect(screen.getAllByText(/^Worked for/)).toHaveLength(1);
+    expect(screen.getByText("Saved checkpoint")).toBeDefined();
+  });
+
+  it("shows a cancelled run as stopped rather than completed", async () => {
+    sessionMessages = [userMessage("message-1", "Stop this work")];
+    vi.stubGlobal("EventSource", RecordingEventSource);
+    await openConsole();
+    const stream = RecordingEventSource.latest as RecordingEventSource;
+    act(() => stream.ready());
+
+    act(() => stream.emit(1, "run_started"));
+    act(() => stream.emit(2, "run_completed", { status: "cancelled" }));
+
+    await waitFor(() => expect(screen.getByText(/^Stopped after/)).toBeDefined());
+    expect(screen.queryByText(/^Worked for/)).toBeNull();
   });
 
   it("ignores a session reply that a newer one has already overtaken", async () => {

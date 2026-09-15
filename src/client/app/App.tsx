@@ -15,7 +15,6 @@ import { AuthScreen } from "../auth/components/AuthScreen";
 import { Dialog } from "../components/Dialog";
 import { Icon, type IconName } from "../components/Icon";
 import { RepositoryConnect } from "../repository/components/RepositoryConnect";
-import { Spinner } from "../components/Spinner";
 import { UserMenu, type SessionUser } from "../auth/components/UserMenu";
 import { defaultSessionTitle, deriveSessionTitle } from "./session-title";
 import {
@@ -57,6 +56,10 @@ interface Run {
   costUsd: number;
   inputTokens: number;
   outputTokens: number;
+  userMessageId?: string;
+  error?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
 }
 
 interface PullRequestSummary {
@@ -68,15 +71,16 @@ interface PullRequestSummary {
 }
 
 type TimelineItem =
-  | { kind: "message"; id: string; createdAt: string; message: MessageView }
+  | { kind: "message"; id: string; createdAt: string; message: MessageView; runId: string | null }
+  | { kind: "pending"; id: string; createdAt: string; text: string; status: "sending" | "queued" }
+  | { kind: "stream"; id: string; createdAt: string; text: string; messageId: string | null; runId: string | null }
+  | { kind: "status"; id: string; createdAt: string; label: string }
   | { kind: "event"; id: string; createdAt: string; event: SessionEvent; reasoningCompleted: boolean; changeCommit?: string };
-
-type EventItem = Extract<TimelineItem, { kind: "event" }>;
 
 /** Each finished stretch of activity collapses behind a summary line. */
 type ThreadNode =
   | { kind: "item"; item: TimelineItem }
-  | { kind: "group"; id: string; label: string; items: EventItem[] };
+  | { kind: "group"; id: string; label: string; items: TimelineItem[] };
 
 interface SessionDetail extends SessionListItem {
   messages: MessageView[];
@@ -90,6 +94,8 @@ interface PendingMessage {
   sessionId: string;
   text: string;
   messageId: string | null;
+  createdAt: string;
+  status: "sending" | "queued";
 }
 
 /**
@@ -97,20 +103,15 @@ interface PendingMessage {
  * as stored, because the stored copy only arrives with the next session fetch.
  */
 interface StreamedAssistant {
+  id: string;
+  runId: string | null;
+  createdAt: string;
   text: string;
   messageId: string | null;
 }
 
 const activeStatuses = new Set(["pending", "running", "cancelling"]);
 const liveOutputLimit = 100_000;
-const agentStatuses = [
-  "Thinking…",
-  "Reading the request…",
-  "Inspecting the repository…",
-  "Planning the next step…",
-  "Noodling on it…",
-];
-const agentStatusInterval = 2_400;
 const workspaceRoot = "/workspace";
 const repositoryRootLabel = "repository";
 
@@ -392,11 +393,7 @@ function formatDuration(startedAt: string, endedAt: string): string {
   return `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m`;
 }
 
-// Run lifecycle events describe the run itself, so they become the group summary
-// rather than lines inside it.
 const runLifecycleTypes = new Set(["run_started", "run_completed"]);
-// A checkpoint labels its diff card, a failure needs reading, and losing earlier
-// context is something the reader has to be told about, so none of them collapse.
 const uncollapsibleTypes = new Set([
   "checkpoint_saved",
   "run_failed",
@@ -404,74 +401,149 @@ const uncollapsibleTypes = new Set([
   "compaction_failed",
 ]);
 
-/** Groups finished activity while keeping messages in their original timeline positions. */
-function buildThread(timeline: TimelineItem[], events: SessionEvent[]): ThreadNode[] {
-  const runs = new Map<string, { startedAt?: string; endedAt?: string; finished: boolean }>();
+function runSummary(
+  runId: string,
+  items: TimelineItem[],
+  events: SessionEvent[],
+  runs: Run[],
+): string {
+  const record = runs.find((run) => run.id === runId);
+  const runEvents = events.filter((event) => event.runId === runId);
+  const startedAt = record?.startedAt ?? runEvents.find((event) => event.type === "run_started")?.createdAt;
+  const terminal = runEvents.filter((event) => event.type === "run_completed" || event.type === "run_failed").at(-1);
+  const endedAt = record?.completedAt ?? terminal?.createdAt ?? startedAt;
+  const status = String(terminal?.payload.status ?? record?.status ?? "completed");
+  const duration = startedAt && endedAt ? formatDuration(startedAt, endedAt) : "a moment";
+  const toolCalls = new Set(
+    items.flatMap((item) => {
+      if (item.kind === "message" && item.message.role === "tool") {
+        return item.message.blocks.flatMap((block) => block.data.callId ? [String(block.data.callId)] : []);
+      }
+      if (item.kind === "event" && item.event.payload.callId) return [String(item.event.payload.callId)];
+      return [];
+    }),
+  );
+  const files = Math.max(
+    0,
+    ...runEvents
+      .filter((event) => event.type === "checkpoint_saved")
+      .map((event) => Number(event.payload.changedFileCount ?? 0)),
+  );
+  const details = [
+    toolCalls.size ? countLabel(toolCalls.size, "action") : null,
+    files ? `${countLabel(files, "file")} changed` : null,
+  ].filter(Boolean).join(" · ");
+  const prefix = status === "cancelled" ? "Stopped after" : status === "failed" ? "Failed after" : "Worked for";
+  return `${prefix} ${duration}${details ? ` · ${details}` : ""}`;
+}
+
+/** A completed run owns one activity summary, regardless of how many messages it produced. */
+function timelineRunId(item: TimelineItem): string | null {
+  if (item.kind === "event") return item.event.runId;
+  if (item.kind === "message" || item.kind === "stream") return item.runId;
+  return null;
+}
+
+function buildThread(timeline: TimelineItem[], events: SessionEvent[], runs: Run[]): ThreadNode[] {
+  const runStates = new Map<string, { finished: boolean }>();
   for (const event of events) {
     if (!event.runId) continue;
-    const run = runs.get(event.runId) ?? { finished: false };
-    if (event.type === "run_started") run.startedAt = event.createdAt;
+    const run = runStates.get(event.runId) ?? { finished: false };
     if (event.type === "run_completed" || event.type === "run_failed") {
-      run.endedAt = event.createdAt;
       run.finished = true;
     }
-    runs.set(event.runId, run);
+    runStates.set(event.runId, run);
+  }
+  for (const run of runs) {
+    runStates.set(run.id, { finished: Boolean(runStates.get(run.id)?.finished || !activeStatuses.has(run.status)) });
   }
 
-  const nodes: ThreadNode[] = [];
-  let pending: EventItem[] = [];
-  let pendingRunId: string | null = null;
-
-  function flush(boundaryAt?: string) {
-    if (pending.length === 0) {
-      pendingRunId = null;
-      return;
-    }
-    const startedAt = pending[0].createdAt;
-    const endedAt = boundaryAt ?? pending[pending.length - 1].createdAt;
-    nodes.push({
-      kind: "group",
-      id: `group-${pending[0].id}`,
-      label: `Worked for ${formatDuration(startedAt, endedAt)}`,
-      items: pending,
-    });
-    pending = [];
-    pendingRunId = null;
-  }
-
+  const groupedByRun = new Map<string, TimelineItem[]>();
+  const groupedIds = new Set<string>();
+  const lastAssistantByRun = new Map<string, string>();
   for (const item of timeline) {
-    if (item.kind === "message") {
-      flush(item.createdAt);
-      nodes.push({ kind: "item", item });
-      continue;
+    const runId = timelineRunId(item);
+    if (!runId) continue;
+    if (item.kind === "stream" || item.kind === "message" && item.message.role === "assistant") {
+      lastAssistantByRun.set(runId, item.id);
     }
-
-    const finished = item.event.runId ? runs.get(item.event.runId)?.finished ?? false : false;
-    if (!finished || uncollapsibleTypes.has(item.event.type)) {
-      flush(item.createdAt);
-      nodes.push({ kind: "item", item });
-      continue;
-    }
-    if (runLifecycleTypes.has(item.event.type)) {
-      if (item.event.type === "run_completed") flush(item.createdAt);
-      continue;
-    }
-
-    if (pendingRunId && pendingRunId !== item.event.runId) flush(item.createdAt);
-    pendingRunId = item.event.runId;
-    pending.push(item);
   }
-  flush();
+  for (const item of timeline) {
+    const runId = timelineRunId(item);
+    if (!runId || !runStates.get(runId)?.finished) continue;
+    const toolName = item.kind === "message" && item.message.role === "tool"
+      ? String(item.message.blocks[0]?.data.toolName ?? "")
+      : "";
+    const collapsible = item.kind === "message"
+      ? item.message.role === "tool" && toolName !== "create_pull_request" || item.message.role === "assistant" && lastAssistantByRun.get(runId) !== item.id
+      : item.kind === "stream"
+        ? lastAssistantByRun.get(runId) !== item.id
+      : item.kind === "event" && !runLifecycleTypes.has(item.event.type) && !uncollapsibleTypes.has(item.event.type);
+    if (!collapsible) continue;
+    groupedByRun.set(runId, [...(groupedByRun.get(runId) ?? []), item]);
+    groupedIds.add(item.id);
+  }
+
+  const insertedRuns = new Set<string>();
+  const nodes: ThreadNode[] = [];
+  for (const item of timeline) {
+    const runId = timelineRunId(item);
+    if (runId && runStates.get(runId)?.finished && runLifecycleTypes.has(item.kind === "event" ? item.event.type : "")) {
+      const grouped = groupedByRun.get(runId) ?? [];
+      if (!insertedRuns.has(runId) && (item.kind === "event" && item.event.type === "run_completed" || grouped.length === 0)) {
+        nodes.push({ kind: "group", id: `run-${runId}`, label: runSummary(runId, grouped, events, runs), items: grouped });
+        insertedRuns.add(runId);
+      }
+      continue;
+    }
+    if (runId && groupedIds.has(item.id)) {
+      if (!insertedRuns.has(runId)) {
+        const grouped = groupedByRun.get(runId) ?? [];
+        nodes.push({ kind: "group", id: `run-${runId}`, label: runSummary(runId, grouped, events, runs), items: grouped });
+        insertedRuns.add(runId);
+      }
+      continue;
+    }
+    nodes.push({ kind: "item", item });
+  }
 
   return nodes;
 }
 
-function buildTimeline(messages: MessageView[], events: SessionEvent[]): TimelineItem[] {
+function messageRunIds(messages: MessageView[], runs: Run[]): Map<string, string> {
+  const anchors = new Map(runs.flatMap((run) => run.userMessageId ? [[run.userMessageId, run.id] as const] : []));
+  const output = new Map<string, string>();
+  let current: string | null = null;
+  for (const message of [...messages].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))) {
+    current = anchors.get(message.id) ?? current;
+    if (current) output.set(message.id, current);
+  }
+  return output;
+}
+
+function buildTimeline(
+  messages: MessageView[],
+  events: SessionEvent[],
+  runs: Run[],
+  pendingMessages: PendingMessage[],
+  streamedAssistants: StreamedAssistant[],
+  starting: { id: string; createdAt: string } | null,
+): TimelineItem[] {
   const completedToolCalls = new Set(
     messages
       .filter((message) => message.role === "tool")
       .flatMap((message) => message.blocks.map((block) => String(block.data.callId ?? "")))
       .filter(Boolean),
+  );
+  const completedToolEvents = new Map(
+    events
+      .filter((event) => event.type === "tool_completed" && event.payload.callId)
+      .map((event) => [String(event.payload.callId), event]),
+  );
+  const startedToolEvents = new Map(
+    events
+      .filter((event) => event.type === "tool_started" && event.payload.callId)
+      .map((event) => [String(event.payload.callId), event]),
   );
   const reasoningCompletions = events.filter((event) => event.type === "reasoning_completed");
   const compactionOutcomes = events.filter(
@@ -483,7 +555,7 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "run_failed",
     "reasoning_started",
     "tool_started",
-    "file_changed",
+    "tool_completed",
     "checkpoint_saved",
     "vision_capability_fallback",
     "compaction_started",
@@ -491,17 +563,33 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     "compaction_failed",
   ]);
 
+  const runIds = messageRunIds(messages, runs);
   const timeline: TimelineItem[] = messages.map((message) => ({
     kind: "message",
-    id: `message-${message.id}`,
+    id: message.role === "tool" && message.blocks[0]?.data.callId
+      ? `tool-${String(message.blocks[0].data.callId)}`
+      : `message-${message.id}`,
     createdAt: message.createdAt,
     message,
+    runId: runIds.get(message.id) ?? null,
   }));
+  const storedMessageIds = new Set(messages.map((message) => message.id));
+  for (const item of pendingMessages) {
+    if (item.messageId && storedMessageIds.has(item.messageId)) continue;
+    timeline.push({ kind: "pending", id: item.messageId ? `message-${item.messageId}` : item.id, createdAt: item.createdAt, text: item.text, status: item.status });
+  }
+  for (const item of streamedAssistants) {
+    if (item.messageId && storedMessageIds.has(item.messageId)) continue;
+    timeline.push({ kind: "stream", id: item.messageId ? `message-${item.messageId}` : item.id, createdAt: item.createdAt, text: item.text, messageId: item.messageId, runId: item.runId });
+  }
+  if (starting) timeline.push({ kind: "status", id: starting.id, createdAt: starting.createdAt, label: "Starting…" });
   const seenCheckpointCommits = new Set<string>();
 
   for (const event of [...events].sort((left, right) => left.sequence - right.sequence)) {
     if (!visibleTypes.has(event.type)) continue;
-    if (event.type === "tool_started" && completedToolCalls.has(String(event.payload.callId ?? ""))) continue;
+    const callId = String(event.payload.callId ?? "");
+    if ((event.type === "tool_started" || event.type === "tool_completed") && completedToolCalls.has(callId)) continue;
+    if (event.type === "tool_started" && completedToolEvents.has(callId)) continue;
     // The in-flight line is there to explain the pause; its outcome replaces it.
     if (
       event.type === "compaction_started" &&
@@ -528,11 +616,22 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
       reasoningCompletions.some(
         (completion) => completion.runId === event.runId && completion.sequence > event.sequence,
       );
+    const pairedStart = event.type === "tool_completed" ? startedToolEvents.get(callId) : undefined;
+    const normalizedEvent = pairedStart
+      ? {
+          ...event,
+          payload: {
+            ...pairedStart.payload,
+            ...event.payload,
+            durationMs: Math.max(0, Date.parse(event.createdAt) - Date.parse(pairedStart.createdAt)),
+          },
+        }
+      : event;
     timeline.push({
       kind: "event",
-      id: `event-${event.id}`,
-      createdAt: event.createdAt,
-      event,
+      id: callId && (event.type === "tool_started" || event.type === "tool_completed") ? `tool-${callId}` : `event-${event.id}`,
+      createdAt: pairedStart?.createdAt ?? event.createdAt,
+      event: normalizedEvent,
       reasoningCompleted,
       ...(commit ? { changeCommit: commit } : {}),
     });
@@ -542,27 +641,55 @@ function buildTimeline(messages: MessageView[], events: SessionEvent[]): Timelin
     const timeDifference = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
     if (timeDifference !== 0) return timeDifference;
     if (left.kind === "event" && right.kind === "event") return left.event.sequence - right.event.sequence;
-    return left.kind === "message" ? -1 : 1;
+    const rank = (item: TimelineItem) => {
+      if (item.kind === "pending" || item.kind === "message" && item.message.role === "user") return 0;
+      if (item.kind === "status") return 1;
+      if (item.kind === "event") return 2;
+      return 3;
+    };
+    return rank(left) - rank(right);
   });
 }
 
-/** Placeholder copy for the gap between sending and the first backend event. */
-function useRotatingStatus(active: boolean): string {
-  const [index, setIndex] = useState(0);
-
+function useClock(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) {
-      setIndex(0);
-      return;
-    }
-    const timer = setInterval(
-      () => setIndex((current) => (current + 1) % agentStatuses.length),
-      agentStatusInterval,
-    );
+    if (!active) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(timer);
   }, [active]);
+  return now;
+}
 
-  return agentStatuses[index];
+function LoadingScreen({ label, detail }: { label: string; detail: string }) {
+  return (
+    <div className="loading-screen" role="status" aria-live="polite">
+      <div className="loading-logo-wrap" aria-hidden="true">
+        <span className="loading-orbit" />
+        <img className="loading-logo" src="/logo.png" alt="" />
+      </div>
+      <strong>{label}</strong>
+      <span className="loading-detail">{detail}<span className="loading-dots" aria-hidden="true" /></span>
+    </div>
+  );
+}
+
+function ConversationLoading() {
+  return (
+    <div className="conversation-loading" role="status" aria-live="polite">
+      <div className="conversation-loading-mark">
+        <img src="/logo.png" alt="" />
+      </div>
+      <div className="conversation-loading-copy">
+        <strong>Opening conversation</strong>
+        <span>Restoring messages and activity</span>
+      </div>
+      <div className="conversation-skeleton" aria-hidden="true">
+        <span /><span /><span /><span />
+      </div>
+    </div>
+  );
 }
 
 export function App() {
@@ -588,9 +715,9 @@ export function App() {
     );
   }
 
-  if (isPending) return <div className="center-state">Opening Aitar…</div>;
+  if (isPending) return <LoadingScreen label="Opening Aitar" detail="Checking your session" />;
   if (!session?.user) {
-    if (!authMethods) return <div className="center-state">Opening Aitar…</div>;
+    if (!authMethods) return <LoadingScreen label="Opening Aitar" detail="Loading sign-in options" />;
     return <AuthScreen entry={entry} emailPassword={authMethods.emailPassword} />;
   }
 
@@ -623,10 +750,17 @@ function Console({
   const [liveToolOutput, setLiveToolOutput] = useState<Record<string, string>>({});
   const [processOutput, setProcessOutput] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [initialLoad, setInitialLoad] = useState({ repositories: false, sessions: false });
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
-  const [agentPlaceholder, setAgentPlaceholder] = useState<{ sessionId: string; afterSequence: number } | null>(null);
+  const [agentPlaceholder, setAgentPlaceholder] = useState<{
+    id: string;
+    sessionId: string;
+    afterSequence: number;
+    createdAt: string;
+  } | null>(null);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const titledSessionsRef = useRef(new Set<string>());
@@ -671,7 +805,10 @@ function Console({
   }, []);
 
   useEffect(() => {
-    Promise.all([loadRepositories(), loadSessions()])
+    Promise.all([
+      loadRepositories().finally(() => setInitialLoad((current) => ({ ...current, repositories: true }))),
+      loadSessions().finally(() => setInitialLoad((current) => ({ ...current, sessions: true }))),
+    ])
       .catch((reason) => setError(reason.message))
       .finally(() => setLoading(false));
   }, [loadRepositories, loadSessions]);
@@ -724,55 +861,53 @@ function Console({
         return;
       }
       if (event.transient && event.type === "process_exited") {
-        void loadDetail(selectedId, true);
         return;
       }
       latestSequenceRef.current = Math.max(latestSequenceRef.current, event.sequence);
       setEvents((current) => {
         if (current.some((candidate) => candidate.id === event.id)) return current;
-        return [...current, event].slice(-300);
+        return [...current, event].slice(-1_000);
       });
 
-      if (eventReplayReadyRef.current && event.type === "assistant_text_delta") {
+      if (event.type === "assistant_text_delta") {
         const delta = String(event.payload.delta ?? "");
         if (delta) {
           setStreamedAssistants((current) => {
             const streaming = current[current.length - 1];
-            if (!streaming || streaming.messageId !== null) {
-              return [...current, { text: delta, messageId: null }];
+            if (!streaming || streaming.messageId !== null || streaming.runId !== event.runId) {
+              return [...current, {
+                id: `stream-${event.runId ?? event.id}-${event.sequence}`,
+                runId: event.runId,
+                createdAt: event.createdAt,
+                text: delta,
+                messageId: null,
+              }];
             }
             return [...current.slice(0, -1), { ...streaming, text: streaming.text + delta }];
           });
         }
       }
 
-      if (
-        eventReplayReadyRef.current &&
-        [
-          "assistant_message_completed",
-          "tool_completed",
-          "run_completed",
-          "run_failed",
-        ].includes(event.type)
-      ) {
-        if (event.type === "assistant_message_completed") {
-          const messageId = String(event.payload.messageId ?? "");
-          setStreamedAssistants((current) => {
-            const streaming = current[current.length - 1];
-            if (!streaming || streaming.messageId !== null) return current;
-            if (!messageId) return current.slice(0, -1);
-            return [...current.slice(0, -1), { ...streaming, messageId }];
-          });
-        }
-        if (event.type === "tool_completed") {
-          const callId = String(event.payload.callId ?? "");
-          setLiveToolOutput((current) => {
-            const next = { ...current };
-            delete next[callId];
-            return next;
-          });
-        }
+      if (event.type === "assistant_message_completed") {
+        const messageId = String(event.payload.messageId ?? "");
+        setStreamedAssistants((current) => {
+          const streaming = current[current.length - 1];
+          if (!streaming || streaming.messageId !== null || streaming.runId !== event.runId) return current;
+          if (!messageId) return current.slice(0, -1);
+          return [...current.slice(0, -1), { ...streaming, messageId }];
+        });
+      }
+      if (event.type === "tool_completed") {
+        const callId = String(event.payload.callId ?? "");
+        setLiveToolOutput((current) => {
+          const next = { ...current };
+          delete next[callId];
+          return next;
+        });
+      }
+      if (eventReplayReadyRef.current && (event.type === "run_completed" || event.type === "run_failed")) {
         void loadDetail(selectedId, true);
+        setAgentPlaceholder((current) => current?.sessionId === selectedId ? null : current);
         void loadSessions();
       }
     };
@@ -806,13 +941,37 @@ function Console({
     agentPlaceholder.sessionId === selectedId &&
     !events.some((event) => event.sequence > agentPlaceholder.afterSequence),
   );
-  const agentStatus = useRotatingStatus(awaitingAgent);
+  const eventRunActive = events.some(
+    (event) => event.type === "run_started" && event.runId && !events.some(
+      (candidate) => candidate.runId === event.runId && (candidate.type === "run_completed" || candidate.type === "run_failed"),
+    ),
+  );
+  const now = useClock(Boolean(detail?.runs.some((run) => activeStatuses.has(run.status)) || eventRunActive || awaitingAgent));
 
   const timeline = useMemo(
-    () => buildTimeline(detail?.messages ?? [], events),
-    [detail?.messages, events],
+    () => buildTimeline(
+      detail?.messages ?? [],
+      events,
+      detail?.runs ?? [],
+      visiblePending,
+      streamedAssistants,
+      awaitingAgent && agentPlaceholder
+        ? { id: agentPlaceholder.id, createdAt: agentPlaceholder.createdAt }
+        : null,
+    ),
+    [agentPlaceholder, awaitingAgent, detail?.messages, detail?.runs, events, streamedAssistants, visiblePending],
   );
-  const thread = useMemo(() => buildThread(timeline, events), [timeline, events]);
+  const thread = useMemo(() => buildThread(timeline, events, detail?.runs ?? []), [timeline, events, detail?.runs]);
+  const runStatusById = useMemo(() => {
+    const statuses = new Map((detail?.runs ?? []).map((run) => [run.id, run.status]));
+    for (const event of events) {
+      if (!event.runId) continue;
+      if (event.type === "run_started" && !statuses.has(event.runId)) statuses.set(event.runId, "running");
+      if (event.type === "run_failed") statuses.set(event.runId, "failed");
+      if (event.type === "run_completed") statuses.set(event.runId, String(event.payload.status ?? "completed"));
+    }
+    return statuses;
+  }, [detail?.runs, events]);
   const checkpointCommits = useMemo(
     () => timeline.flatMap((item) => item.kind === "event" && item.changeCommit ? [item.changeCommit] : []),
     [timeline],
@@ -848,20 +1007,19 @@ function Console({
     if (changedSession) {
       renderedSessionRef.current = detail.session.id;
       shouldFollowMessagesRef.current = true;
+      setShowJumpToLatest(false);
     }
 
     if (changedSession || shouldFollowMessagesRef.current) {
       messages.scrollTop = messages.scrollHeight;
     }
   }, [
-    agentStatus,
     changesByCommit,
     detail,
     liveToolOutput,
     processOutput,
     selectedId,
-    streamedAssistants,
-    visiblePending,
+    thread,
   ]);
 
   const sessionsByRepository = useMemo(() => {
@@ -950,7 +1108,14 @@ function Console({
 
   const installationNotice = installationConnected ? "GitHub connected" : null;
 
-  if (loading) return <div className="center-state">Opening Aitar…</div>;
+  if (loading) {
+    const detail = !initialLoad.repositories
+      ? "Loading your repositories"
+      : !initialLoad.sessions
+        ? "Opening conversations"
+        : "Finishing setup";
+    return <LoadingScreen label="Opening Aitar" detail={detail} />;
+  }
 
   if (repositories.length === 0) {
     return (
@@ -1043,11 +1208,7 @@ function Console({
       </aside>
 
       <main className="conversation">
-        {sessionView === "loading" && (
-          <div className="conversation-state">
-            <Spinner size={20} label="Loading session…" />
-          </div>
-        )}
+        {sessionView === "loading" && <ConversationLoading />}
 
         {sessionView === "empty" && (
           <div className="conversation-state">
@@ -1086,6 +1247,7 @@ function Console({
                 const element = event.currentTarget;
                 const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
                 shouldFollowMessagesRef.current = distanceFromBottom < 80;
+                setShowJumpToLatest(!shouldFollowMessagesRef.current);
               }}
             >
               <div className="thread">
@@ -1101,31 +1263,32 @@ function Console({
 
               {thread.map((node) =>
                 node.kind === "group" ? (
-                  <StepGroup key={node.id} label={node.label}>
+                  <StepGroup key={node.id} label={node.label} collapsible={node.items.length > 0}>
                     {node.items.map((item) => (
-                      <TimelineEvent
+                      <TimelineItemView
                         key={item.id}
-                        event={item.event}
-                        reasoningCompleted={item.reasoningCompleted}
+                        item={item}
+                        sessionId={detail.session.id}
+                        pullRequests={pullRequestsByNumber}
+                        processOutput={processOutput}
+                        liveToolOutput={liveToolOutput}
+                        runStatusById={runStatusById}
+                        now={now}
                       />
                     ))}
                   </StepGroup>
-                ) : node.item.kind === "message" ? (
-                  <Message
-                    key={node.item.id}
-                    message={node.item.message}
-                    sessionId={detail.session.id}
-                    pullRequests={pullRequestsByNumber}
-                    processOutput={processOutput}
-                  />
                 ) : (
                   <Fragment key={node.item.id}>
-                    <TimelineEvent
-                      event={node.item.event}
-                      reasoningCompleted={node.item.reasoningCompleted}
-                      liveOutput={liveToolOutput[String(node.item.event.payload.callId ?? "")]}
+                    <TimelineItemView
+                      item={node.item}
+                      sessionId={detail.session.id}
+                      pullRequests={pullRequestsByNumber}
+                      processOutput={processOutput}
+                      liveToolOutput={liveToolOutput}
+                      runStatusById={runStatusById}
+                      now={now}
                     />
-                    {node.item.changeCommit && changesByCommit[node.item.changeCommit] && (
+                    {node.item.kind === "event" && node.item.changeCommit && changesByCommit[node.item.changeCommit] && (
                       <CodeChangesCard
                         changes={changesByCommit[node.item.changeCommit]}
                         sessionId={detail.session.id}
@@ -1135,36 +1298,25 @@ function Console({
                   </Fragment>
                 ),
               )}
-
-              {visiblePending.map((item) => (
-                <div className="message user-message pending" key={item.id}>
-                  <div className="message-body">{item.text}</div>
-                  <span className="user-avatar">You</span>
-                </div>
-              ))}
-
-              {awaitingAgent && (
-                <div className="timeline-event working">
-                  <span className="timeline-event-icon">
-                    <Icon name="sparkles" size={14} />
-                  </span>
-                  <span className="timeline-event-verb">{agentStatus}</span>
-                </div>
-              )}
-
-              {streamedAssistants.map((item) => (
-                <div
-                  className={`message assistant-message ${item.messageId ? "" : "streaming"}`}
-                  key={item.messageId ?? "streaming"}
-                >
-                  <div className="message-body markdown-content">
-                    <MarkdownText>{item.text}</MarkdownText>
-                    {!item.messageId && <span className="cursor" />}
-                  </div>
-                </div>
-              ))}
               </div>
             </div>
+
+            {showJumpToLatest && (
+              <button
+                className="jump-to-latest"
+                type="button"
+                onClick={() => {
+                  const messages = messagesRef.current;
+                  if (!messages) return;
+                  shouldFollowMessagesRef.current = true;
+                  setShowJumpToLatest(false);
+                  messages.scrollTo({ top: messages.scrollHeight, behavior: "smooth" });
+                }}
+              >
+                <Icon name="arrow-down" size={14} />
+                Jump to latest
+              </button>
+            )}
 
             <Composer
               sessionId={detail.session.id}
@@ -1177,18 +1329,33 @@ function Console({
                 asThinkingLevel(detail.session.defaultThinkingLevel),
               )}
               onModelChange={(next) => void selectModel(detail.session.id, next)}
-              onCancel={activeRun ? () => api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" }) : undefined}
+              onCancel={activeRun ? async () => {
+                setDetail((current) => current ? {
+                  ...current,
+                  runs: current.runs.map((run) => run.id === activeRun.id ? { ...run, status: "cancelling" } : run),
+                } : current);
+                try {
+                  await api(`/api/runs/${activeRun.id}/cancel`, { method: "POST" });
+                } catch (reason) {
+                  setError(reason instanceof Error ? reason.message : String(reason));
+                  await loadDetail(detail.session.id, true);
+                  throw reason;
+                }
+              } : undefined}
               onSend={async (text) => {
                 const sessionId = detail.session.id;
                 const pendingId = crypto.randomUUID();
                 setError(null);
                 shouldFollowMessagesRef.current = true;
                 if (detail.session.title === defaultSessionTitle) titleFromFirstMessage(sessionId, text);
+                const createdAt = new Date().toISOString();
                 setPendingMessages((current) => [
                   ...current,
-                  { id: pendingId, sessionId, text, messageId: null },
+                  { id: pendingId, sessionId, text, messageId: null, createdAt, status: activeRun ? "queued" : "sending" },
                 ]);
-                setAgentPlaceholder({ sessionId, afterSequence: latestSequenceRef.current });
+                if (!activeRun) {
+                  setAgentPlaceholder({ id: `starting-${pendingId}`, sessionId, afterSequence: latestSequenceRef.current, createdAt });
+                }
 
                 try {
                   const result = await api<{ message: { id: string } }>(
@@ -1224,6 +1391,73 @@ function Console({
         />
       )}
     </div>
+  );
+}
+
+function TimelineItemView({
+  item,
+  sessionId,
+  pullRequests,
+  processOutput,
+  liveToolOutput,
+  runStatusById,
+  now,
+}: {
+  item: TimelineItem;
+  sessionId: string;
+  pullRequests: Record<number, PullRequestSummary>;
+  processOutput: Record<string, string>;
+  liveToolOutput: Record<string, string>;
+  runStatusById: Map<string, string>;
+  now: number;
+}) {
+  if (item.kind === "message") {
+    return (
+      <Message
+        message={item.message}
+        sessionId={sessionId}
+        pullRequests={pullRequests}
+        processOutput={processOutput}
+      />
+    );
+  }
+  if (item.kind === "pending") {
+    return (
+      <div className={`message user-message pending ${item.status}`}>
+        <div className="user-message-content">
+          <div className="message-body">{item.text}</div>
+          {item.status === "queued" && <small className="message-delivery">Queued for the agent</small>}
+        </div>
+        <span className="user-avatar">You</span>
+      </div>
+    );
+  }
+  if (item.kind === "stream") {
+    return (
+      <div className={`message assistant-message ${item.messageId ? "" : "streaming"}`}>
+        <div className="message-body markdown-content">
+          <MarkdownText>{item.text}</MarkdownText>
+          {!item.messageId && <span className="cursor" />}
+        </div>
+      </div>
+    );
+  }
+  if (item.kind === "status") {
+    return (
+      <div className="timeline-event working agent-starting" aria-live="polite">
+        <span className="timeline-event-icon agent-status-logo"><img src="/logo.png" alt="" /></span>
+        <span className="timeline-event-verb">{item.label}</span>
+      </div>
+    );
+  }
+  return (
+    <TimelineEvent
+      event={item.event}
+      reasoningCompleted={item.reasoningCompleted}
+      liveOutput={liveToolOutput[String(item.event.payload.callId ?? "")]}
+      runStatus={item.event.runId ? runStatusById.get(item.event.runId) : undefined}
+      now={now}
+    />
   );
 }
 
@@ -1339,7 +1573,10 @@ function Message({
   if (message.role === "user") {
     return (
       <div className={`message user-message ${message.status === "queued" ? "queued" : ""}`}>
-        <div className="message-body">{messageText(message)}</div>
+        <div className="user-message-content">
+          <div className="message-body">{messageText(message)}</div>
+          {message.status === "queued" && <small className="message-delivery">Queued for the agent</small>}
+        </div>
         <span className="user-avatar">You</span>
       </div>
     );
@@ -1390,7 +1627,16 @@ function PullRequestCard({
 }
 
 /** Collapses a finished run's steps into one line — the user reads the prose, not the steps. */
-function StepGroup({ label, children }: { label: string; children: ReactNode }) {
+function StepGroup({ label, children, collapsible }: { label: string; children: ReactNode; collapsible: boolean }) {
+  if (!collapsible) {
+    const failed = label.startsWith("Failed");
+    return (
+      <div className={`step-group-summary ${failed ? "error" : "success"}`}>
+        <Icon name={failed ? "alert-triangle" : "check"} size={14} />
+        <span className="timeline-event-verb">{label}</span>
+      </div>
+    );
+  }
   return (
     <details className="step-group">
       <summary>
@@ -1581,14 +1827,65 @@ function Composer({
   );
 }
 
+function runningToolPresentation(event: SessionEvent, completed: boolean) {
+  const toolName = String(event.payload.toolName ?? "tool");
+  const args = typeof event.payload.arguments === "object" && event.payload.arguments
+    ? event.payload.arguments as Record<string, unknown>
+    : {};
+  const result = toolPresentation({
+    id: `live-${event.id}`,
+    position: 0,
+    type: "tool_result",
+    text: null,
+    data: {
+      ...args,
+      toolName,
+      isError: Boolean(event.payload.isError),
+      durationMs: event.payload.durationMs,
+    },
+    visibility: "both",
+  }, Boolean(event.payload.isError));
+  if (completed) return result;
+  const verbs: Record<string, string> = {
+    read: "Reading",
+    edit: "Editing",
+    write: "Writing",
+    grep: "Searching for",
+    find: "Finding files",
+    ls: "Listing",
+    bash: "Running",
+    start_process: "Starting",
+    process_logs: "Reading process logs",
+    stop_process: "Stopping",
+    create_pull_request: "Creating pull request",
+    inspect_image: "Inspecting screenshot",
+    browser_navigate: "Opening",
+    browser_snapshot: "Reading page structure",
+    browser_click: "Clicking",
+    browser_type: "Typing",
+    browser_select: "Selecting",
+    browser_press: "Pressing",
+    browser_scroll: "Scrolling",
+    browser_wait: "Waiting for the page",
+    browser_screenshot: "Capturing screenshot",
+    browser_console: "Reading console",
+    browser_close: "Closing browser",
+  };
+  return { ...result, verb: verbs[toolName] ?? `Running ${toolLabel(toolName)}`, detail: "" };
+}
+
 function TimelineEvent({
   event,
   reasoningCompleted,
   liveOutput,
+  runStatus,
+  now,
 }: {
   event: SessionEvent;
   reasoningCompleted: boolean;
   liveOutput?: string;
+  runStatus?: string;
+  now: number;
 }) {
   // One line per action: a verb, a muted detail, an optional mono chip.
   let icon: IconName = "check";
@@ -1599,7 +1896,8 @@ function TimelineEvent({
 
   if (event.type === "run_started") {
     icon = "play";
-    verb = "Started working";
+    verb = runStatus === "cancelling" ? "Stopping…" : "Working";
+    detail = formatDuration(event.createdAt, new Date(now).toISOString());
     tone = "working";
   } else if (event.type === "run_completed") {
     icon = "check";
@@ -1613,25 +1911,33 @@ function TimelineEvent({
     tone = "error";
   } else if (event.type === "reasoning_started") {
     icon = "sparkles";
-    verb = reasoningCompleted ? "Finished reasoning" : "Reasoning";
+    verb = reasoningCompleted ? "Thought through the next step" : "Thinking";
+    if (!reasoningCompleted) detail = formatDuration(event.createdAt, new Date(now).toISOString());
     tone = reasoningCompleted ? "neutral" : "working";
-  } else if (event.type === "tool_started") {
-    icon = "terminal";
-    verb = "Running";
-    code = toolLabel(event.payload.toolName);
-    tone = "working";
+  } else if (event.type === "tool_started" || event.type === "tool_completed") {
+    const completed = event.type === "tool_completed";
+    const presentation = runningToolPresentation(event, completed);
+    icon = toolIcon(String(event.payload.toolName ?? "tool"));
+    verb = presentation.verb;
+    code = presentation.code;
+    detail = completed
+      ? presentation.detail
+      : formatDuration(event.createdAt, new Date(now).toISOString());
+    tone = completed ? (event.payload.isError ? "error" : "neutral") : "working";
   } else if (event.type === "file_changed") {
     icon = "file-diff";
     verb = "Edited";
     code = event.payload.path ? repositoryPath(String(event.payload.path)) : "";
   } else if (event.type === "checkpoint_saved") {
     icon = "layers";
-    verb = "Saved checkpoint";
+    verb = activeStatuses.has(runStatus ?? "") ? "Finalizing changes…" : "Saved checkpoint";
     const changedFileCount = Number(
       event.payload.changedFileCount ??
       (Array.isArray(event.payload.changedFiles) ? event.payload.changedFiles.length : 0),
     );
-    detail = changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
+    detail = activeStatuses.has(runStatus ?? "")
+      ? "Saving a recoverable checkpoint"
+      : changedFileCount === 1 ? "1 changed file" : `${changedFileCount} changed files`;
   } else if (event.type === "compaction_started") {
     icon = "archive";
     verb = "Optimising context";
@@ -1663,8 +1969,9 @@ function TimelineEvent({
           <span className="tool-icon">
             <Icon name="terminal" size={14} />
           </span>
-          <span className="timeline-event-verb">Running</span>
-          <span className="timeline-event-code">{toolLabel(event.payload.toolName)}</span>
+          <span className="timeline-event-verb">{verb}</span>
+          {code && <span className="timeline-event-code">{code}</span>}
+          <span className="timeline-event-detail">{formatDuration(event.createdAt, new Date(now).toISOString())}</span>
         </summary>
         <pre>{liveOutput}</pre>
       </details>
@@ -1681,8 +1988,8 @@ function TimelineEvent({
         <Icon name={icon} size={14} />
       </span>
       <span className="timeline-event-verb">{verb}</span>
-      {detail && <span className="timeline-event-detail">{detail}</span>}
       {code && <span className="timeline-event-code">{code}</span>}
+      {detail && <span className="timeline-event-detail">{detail}</span>}
     </div>
   );
 }
