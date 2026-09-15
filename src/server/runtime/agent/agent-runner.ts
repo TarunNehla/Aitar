@@ -308,7 +308,7 @@ export async function executeRun(run: RunInput, relation: SessionRelation): Prom
   const writer = new EventWriter(run.sessionId, run.id);
   const cost = new RunCostAccount(run.maxCostUsd);
   let turns = 0;
-  let parentMessageId = relation.session.currentLeafMessageId;
+  let parentMessageId: string | null = run.userMessageId;
   let repositoryPath = "";
 
   const checkpoint = async () => {
