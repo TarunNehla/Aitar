@@ -25,10 +25,11 @@ export function LandingFooter({ onGetStarted }: LandingFooterProps) {
           <div className="footer-links-grid">
             <div className="footer-column">
               <span className="footer-column-title">Product</span>
-              <a className="footer-link" href="#features">Features</a>
-              <a className="footer-link" href="#demo">Live Demo</a>
-              <a className="footer-link" href="#workflow">Workflow</a>
-              <a className="footer-link" href="#models">Supported Models</a>
+              <a className="footer-link" href="#demo">Workbench</a>
+              <a className="footer-link" href="#architecture">Architecture</a>
+              <a className="footer-link" href="#sidecar">Chromium Sidecar</a>
+              <a className="footer-link" href="#models">Models</a>
+              <a className="footer-link" href="#faq">FAQ</a>
             </div>
 
             <div className="footer-column">

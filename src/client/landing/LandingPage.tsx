@@ -2,10 +2,7 @@ import "./landing.css";
 import { LandingNav } from "./LandingNav";
 import { HeroSection } from "./HeroSection";
 import { InteractiveDemo } from "./InteractiveDemo";
-import { MetricsStrip } from "./MetricsStrip";
-import { FeaturesSection } from "./FeaturesSection";
-import { WorkflowSection } from "./WorkflowSection";
-import { ComparisonSection } from "./ComparisonSection";
+import { ArchitectureSection } from "./ArchitectureSection";
 import { ModelsSection } from "./ModelsSection";
 import { FaqSection } from "./FaqSection";
 import { CtaSection } from "./CtaSection";
@@ -22,10 +19,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       <main>
         <HeroSection onGetStarted={onGetStarted} />
         <InteractiveDemo />
-        <MetricsStrip />
-        <FeaturesSection />
-        <WorkflowSection />
-        <ComparisonSection />
+        <ArchitectureSection />
         <ModelsSection />
         <FaqSection />
         <CtaSection onGetStarted={onGetStarted} />

@@ -18,18 +18,18 @@ export function LandingNav({ onGetStarted }: LandingNavProps) {
 
         <ul className="landing-nav-links">
           <li>
-            <a className="landing-nav-link" href="#features">
-              Features
-            </a>
-          </li>
-          <li>
             <a className="landing-nav-link" href="#demo">
-              Live Preview
+              Workbench
             </a>
           </li>
           <li>
-            <a className="landing-nav-link" href="#workflow">
-              Workflow
+            <a className="landing-nav-link" href="#architecture">
+              Architecture
+            </a>
+          </li>
+          <li>
+            <a className="landing-nav-link" href="#sidecar">
+              Chromium Sidecar
             </a>
           </li>
           <li>
@@ -60,7 +60,7 @@ export function LandingNav({ onGetStarted }: LandingNavProps) {
             Sign In
           </button>
 
-          <button className="landing-cta-btn" onClick={onGetStarted}>
+          <button className="landing-btn-nav" onClick={onGetStarted}>
             <span>Get Started</span>
             <Icon name="arrow-right" size={14} />
           </button>
