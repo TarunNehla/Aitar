@@ -1,11 +1,9 @@
 import "./landing.css";
 import { LandingNav } from "./LandingNav";
 import { HeroSection } from "./HeroSection";
-import { InteractiveDemo } from "./InteractiveDemo";
-import { ArchitectureSection } from "./ArchitectureSection";
-import { ModelsSection } from "./ModelsSection";
-import { FaqSection } from "./FaqSection";
-import { CtaSection } from "./CtaSection";
+import { SimpleWorkflow } from "./SimpleWorkflow";
+import { SimpleFeatures } from "./SimpleFeatures";
+import { SimpleCta } from "./SimpleCta";
 import { LandingFooter } from "./LandingFooter";
 
 interface LandingPageProps {
@@ -14,15 +12,13 @@ interface LandingPageProps {
 
 export function LandingPage({ onGetStarted }: LandingPageProps) {
   return (
-    <div className="landing-page">
+    <div className="minimal-landing-root">
       <LandingNav onGetStarted={onGetStarted} />
-      <main>
+      <main className="landing-main-flow">
         <HeroSection onGetStarted={onGetStarted} />
-        <InteractiveDemo />
-        <ArchitectureSection />
-        <ModelsSection />
-        <FaqSection />
-        <CtaSection onGetStarted={onGetStarted} />
+        <SimpleWorkflow />
+        <SimpleFeatures />
+        <SimpleCta onGetStarted={onGetStarted} />
       </main>
       <LandingFooter onGetStarted={onGetStarted} />
     </div>

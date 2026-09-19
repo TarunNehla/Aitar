@@ -8,59 +8,37 @@ interface LandingNavProps {
 
 export function LandingNav({ onGetStarted }: LandingNavProps) {
   return (
-    <header className="landing-header">
-      <div className="landing-nav-container">
-        <div className="landing-brand-link" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
-          <img className="landing-brand-logo" src="/logo.png" alt={brandName} />
-          <span className="landing-brand-title">{brandName}</span>
-          <span className="landing-badge accent">Beta</span>
+    <header className="minimal-header">
+      <div className="minimal-nav-wrap">
+        <div className="nav-brand" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}>
+          <img className="nav-logo" src="/logo.png" alt={brandName} />
+          <span className="nav-title">{brandName}</span>
+          <span className="nav-beta-tag">Beta</span>
         </div>
 
-        <ul className="landing-nav-links">
-          <li>
-            <a className="landing-nav-link" href="#demo">
-              Workbench
-            </a>
-          </li>
-          <li>
-            <a className="landing-nav-link" href="#architecture">
-              Architecture
-            </a>
-          </li>
-          <li>
-            <a className="landing-nav-link" href="#sidecar">
-              Chromium Sidecar
-            </a>
-          </li>
-          <li>
-            <a className="landing-nav-link" href="#models">
-              Models
-            </a>
-          </li>
-          <li>
-            <a className="landing-nav-link" href="#faq">
-              FAQ
-            </a>
-          </li>
-        </ul>
-
-        <div className="landing-nav-actions">
+        <nav className="nav-links">
+          <a className="nav-link" href="#how-it-works">
+            How it works
+          </a>
+          <a className="nav-link" href="#features">
+            Features
+          </a>
           <a
-            className="landing-github-button"
+            className="nav-link github-link"
             href="https://github.com/TarunNehla/Aitar"
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Star Aitar on GitHub"
           >
             <ProviderIcon provider="github" size={16} />
             <span>GitHub</span>
           </a>
+        </nav>
 
-          <button className="landing-login-btn" onClick={onGetStarted}>
+        <div className="nav-actions">
+          <button className="nav-signin-btn" onClick={onGetStarted}>
             Sign In
           </button>
-
-          <button className="landing-btn-nav" onClick={onGetStarted}>
+          <button className="nav-get-started-btn" onClick={onGetStarted}>
             <span>Get Started</span>
             <Icon name="arrow-right" size={14} />
           </button>

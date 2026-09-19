@@ -222,7 +222,7 @@ describe("authenticated application state", () => {
   it("shows the landing page when there is no session and transitions to sign-in", () => {
     render(<App />);
 
-    expect(screen.getByText(/Autonomous software engineering/i)).toBeDefined();
+    expect(screen.getByText(/Describe what to build/i)).toBeDefined();
     expect(screen.getAllByRole("button", { name: /Get Started/i }).length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
