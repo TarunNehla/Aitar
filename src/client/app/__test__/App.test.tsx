@@ -222,10 +222,12 @@ describe("authenticated application state", () => {
   it("shows the landing page when there is no session and transitions to sign-in", () => {
     render(<App />);
 
-    expect(screen.getByText(/Describe what to build/i)).toBeDefined();
-    expect(screen.getAllByRole("button", { name: /Get Started/i }).length).toBeGreaterThan(0);
+    expect(screen.getByText(/A coding agent that works in the cloud/i)).toBeDefined();
+    expect(screen.getByText(/From request to pull request/i)).toBeDefined();
+    expect(screen.getByText(/Tests changes in a real browser/i)).toBeDefined();
+    expect(screen.getAllByRole("button", { name: /Get started/i }).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: /Get started/i })[0]);
     expect(screen.getByText("Sign in to continue")).toBeDefined();
     expect(screen.getByText("Continue with Google")).toBeDefined();
     expect(screen.getByText("Continue with GitHub")).toBeDefined();
