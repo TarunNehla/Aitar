@@ -12,6 +12,7 @@ import {
 } from "../auth/auth-client";
 import { readAuthEntry, signInEntry } from "../auth/auth-flow";
 import { AuthScreen } from "../auth/components/AuthScreen";
+import { LandingPage } from "../landing/LandingPage";
 import { Dialog } from "../components/Dialog";
 import { Icon, type IconName } from "../components/Icon";
 import { RepositoryConnect } from "../repository/components/RepositoryConnect";
@@ -697,6 +698,7 @@ export function App() {
   const authMethods = useAuthMethods();
   const [authQuery] = useState(() => readAuthQueryParameters(window.location.search));
   const [entry, setEntry] = useState(() => readAuthEntry(window.location));
+  const [showAuth, setShowAuth] = useState(false);
 
   useEffect(() => {
     clearAuthQueryParameters();
@@ -718,6 +720,7 @@ export function App() {
   if (isPending) return <LoadingScreen label="Opening Aitar" detail="Checking your session" />;
   if (!session?.user) {
     if (!authMethods) return <LoadingScreen label="Opening Aitar" detail="Loading sign-in options" />;
+    if (!showAuth) return <LandingPage onGetStarted={() => setShowAuth(true)} />;
     return <AuthScreen entry={entry} emailPassword={authMethods.emailPassword} />;
   }
 
