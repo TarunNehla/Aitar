@@ -698,7 +698,15 @@ export function App() {
   const authMethods = useAuthMethods();
   const [authQuery] = useState(() => readAuthQueryParameters(window.location.search));
   const [entry, setEntry] = useState(() => readAuthEntry(window.location));
-  const [showAuth, setShowAuth] = useState(false);
+  const [showAuth, setShowAuth] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      Boolean(entry.error) ||
+      window.location.pathname === "/login" ||
+      window.location.pathname === "/auth" ||
+      window.location.search.includes("auth=true")
+    );
+  });
 
   useEffect(() => {
     clearAuthQueryParameters();

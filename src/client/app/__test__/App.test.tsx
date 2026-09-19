@@ -219,9 +219,13 @@ afterEach(() => {
 });
 
 describe("authenticated application state", () => {
-  it("shows the sign-in screen when there is no session", () => {
+  it("shows the landing page when there is no session and transitions to sign-in", () => {
     render(<App />);
 
+    expect(screen.getByText(/The autonomous cloud coding agent/i)).toBeDefined();
+    expect(screen.getAllByRole("button", { name: /Get Started/i }).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
     expect(screen.getByText("Sign in to continue")).toBeDefined();
     expect(screen.getByText("Continue with Google")).toBeDefined();
     expect(screen.getByText("Continue with GitHub")).toBeDefined();
@@ -258,7 +262,7 @@ describe("authenticated application state", () => {
     sessionState = { data: null, isPending: false };
     view.rerender(<App />);
 
-    expect(screen.getByText("Sign in to continue")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: /Get Started/i }).length).toBeGreaterThan(0);
     expect(screen.queryByText("Confidential project")).toBeNull();
     expect(screen.queryByText("Private chat title")).toBeNull();
     expect(screen.queryByText("ada@example.com")).toBeNull();
@@ -266,6 +270,7 @@ describe("authenticated application state", () => {
 
   it("offers the email and password form only where the deployment enables it", () => {
     render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
     expect(screen.getByLabelText("Email")).toBeDefined();
     expect(screen.getByLabelText("Password")).toBeDefined();
     expect(screen.getByRole("button", { name: "Sign in" })).toBeDefined();
@@ -273,6 +278,7 @@ describe("authenticated application state", () => {
     cleanup();
     authMethods = { emailPassword: false };
     render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
 
     expect(screen.queryByLabelText("Password")).toBeNull();
     expect(screen.queryByRole("button", { name: "Forgot password?" })).toBeNull();
@@ -696,6 +702,7 @@ describe("Aitar branding", () => {
 
   it("names the product on the sign-in screen", () => {
     render(<App />);
+    fireEvent.click(screen.getAllByRole("button", { name: /Get Started/i })[0]);
 
     expect(screen.getByText("Aitar")).toBeDefined();
     expect(document.body.textContent).not.toContain("Cloud Agents");

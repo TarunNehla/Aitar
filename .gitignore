@@ -12,3 +12,4 @@ chatgpt.json
 claude.json
 
 .deploy/
+.playwright-cli/
