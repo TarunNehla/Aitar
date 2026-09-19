@@ -1,3 +1,5 @@
+import { Icon } from "../components/Icon";
+
 export function ComparisonSection() {
   return (
     <section className="section-container">
@@ -28,9 +30,24 @@ export function ComparisonSection() {
             </tr>
             <tr>
               <td><strong>Live Web UI Testing</strong></td>
-              <td>❌ Blind to UI &amp; DOM</td>
-              <td>❌ Blind to UI &amp; DOM</td>
-              <td className="highlight"><strong>✅ Real Chromium Sidecar</strong></td>
+              <td>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", color: "#f87171" }}>
+                  <Icon name="x" size={14} />
+                  <span>Blind to UI &amp; DOM</span>
+                </span>
+              </td>
+              <td>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", color: "#f87171" }}>
+                  <Icon name="x" size={14} />
+                  <span>Blind to UI &amp; DOM</span>
+                </span>
+              </td>
+              <td className="highlight">
+                <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", color: "#34d399", fontWeight: 600 }}>
+                  <Icon name="circle-check" size={14} />
+                  <span>Real Chromium Sidecar</span>
+                </span>
+              </td>
             </tr>
             <tr>
               <td><strong>Hardware &amp; Battery Impact</strong></td>
